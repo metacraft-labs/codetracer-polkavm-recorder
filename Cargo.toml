@@ -1,0 +1,34 @@
+[package]
+name = "codetracer-polkavm-recorder"
+version = "0.1.0"
+edition = "2024"
+authors = ["Metacraft Labs Ltd"]
+description = "CodeTracer recorder for PolkaVM programs (RISC-V based virtual machine)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "codetracer-polkavm-recorder"
+path = "src/main.rs"
+
+[dependencies]
+# CodeTracer trace format
+codetracer_trace_types = "0.16"
+codetracer_trace_writer = "0.17"
+
+# PolkaVM
+polkavm = "0.32"
+polkavm-common = "0.32"
+polkavm-linker = "0.32"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+eyre = "0.6"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
