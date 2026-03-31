@@ -1,0 +1,9 @@
+Assembly test programs for PolkaVM recorder.
+
+These programs are constructed programmatically using polkavm-common's
+ProgramBlobBuilder in the test code (tests/test_tracer.rs), avoiding
+the need for a RISC-V cross-compilation toolchain in CI.
+
+The ProgramBlobBuilder API allows us to specify PolkaVM instructions
+directly and produce a valid ProgramBlob that can be loaded and
+executed by the PolkaVM engine.
