@@ -91,10 +91,10 @@ impl DwarfVariableInfo {
                     if pc >= range.start && pc < range.end {
                         // Use the outermost (first) frame for function name -
                         // this gives us the actual function, not inlined callees.
-                        if let Some(frame) = region_info.frames().next() {
-                            if let Ok(Some(func_name)) = frame.function_name_without_namespace() {
-                                frame_functions.insert(pc.0, func_name.to_string());
-                            }
+                        if let Some(frame) = region_info.frames().next()
+                            && let Ok(Some(func_name)) = frame.function_name_without_namespace()
+                        {
+                            frame_functions.insert(pc.0, func_name.to_string());
                         }
                         break;
                     }
