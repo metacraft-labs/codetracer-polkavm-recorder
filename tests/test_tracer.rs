@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use codetracer_trace_writer::TraceEventsFileFormat;
-use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 /// Helper: create a simple PolkaVM program blob that adds two numbers.
@@ -72,12 +72,8 @@ fn run_tracer_on_blob(blob_bytes: &[u8], out_dir: &Path) {
     let blob_path = out_dir.join("test_program.polkavm");
     std::fs::write(&blob_path, blob_bytes).expect("failed to write blob");
 
-    codetracer_polkavm_recorder::recorder::record(
-        &blob_path,
-        out_dir,
-        TraceEventsFileFormat::Json,
-    )
-    .expect("trace_program should succeed");
+    codetracer_polkavm_recorder::recorder::record(&blob_path, out_dir, TraceEventsFileFormat::Json)
+        .expect("trace_program should succeed");
 }
 
 /// Helper: parse the trace events JSON from the output directory.
@@ -135,9 +131,7 @@ fn collect_variable_names(events: &[serde_json::Value]) -> Vec<String> {
 /// Helper: find all Int values for a given register name across the trace.
 fn find_register_values(events: &[serde_json::Value], register_name: &str) -> Vec<i64> {
     let var_names = collect_variable_names(events);
-    let var_id = var_names
-        .iter()
-        .position(|name| name == register_name);
+    let var_id = var_names.iter().position(|name| name == register_name);
 
     match var_id {
         Some(id) => {
@@ -345,7 +339,9 @@ fn test_polkavm_step_count_reasonable() {
             step.get("path_id").is_some(),
             "Step event should have path_id field"
         );
-        let line = step["line"].as_i64().expect("Step line should be an integer");
+        let line = step["line"]
+            .as_i64()
+            .expect("Step line should be an integer");
         assert!(line > 0, "Step line should be positive, got {}", line);
     }
 }
@@ -417,14 +413,11 @@ fn test_polkavm_tracer_paths_valid() {
     let blob = create_add_program_blob();
     run_tracer_on_blob(&blob, &out_dir);
 
-    let paths_content = std::fs::read_to_string(out_dir.join("trace_paths.json"))
-        .expect("failed to read paths");
+    let paths_content =
+        std::fs::read_to_string(out_dir.join("trace_paths.json")).expect("failed to read paths");
     let paths: serde_json::Value =
         serde_json::from_str(&paths_content).expect("trace_paths.json should be valid JSON");
-    assert!(
-        paths.is_array(),
-        "trace_paths.json should be a JSON array"
-    );
+    assert!(paths.is_array(), "trace_paths.json should be a JSON array");
     // Paths should not be empty -- at least the blob path should be registered.
     let paths_arr = paths.as_array().unwrap();
     assert!(
@@ -452,7 +445,9 @@ fn test_polkavm_register_names_emitted() {
     // The tracer emits resolved variable names when debug info is available.
     // Within a function scope (like "main"), A0-A5 are renamed to arg0-arg5.
     // Non-argument registers keep their raw names: S0-S1, T0-T2, SP, RA.
-    let expected_names = ["arg0", "arg1", "arg2", "arg3", "arg4", "arg5", "S0", "S1", "T0", "T1", "T2", "SP", "RA"];
+    let expected_names = [
+        "arg0", "arg1", "arg2", "arg3", "arg4", "arg5", "S0", "S1", "T0", "T1", "T2", "SP", "RA",
+    ];
     for name in &expected_names {
         assert!(
             var_names.contains(&name.to_string()),
@@ -593,10 +588,7 @@ fn test_polkavm_cli_record_with_blob() {
     assert!(!events.is_empty(), "CLI trace should have events");
 
     let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
-    assert!(
-        step_count > 0,
-        "CLI trace should contain Step events"
-    );
+    assert!(step_count > 0, "CLI trace should contain Step events");
 
     // Verify register values were captured through CLI too.
     // A0 is renamed to arg0 within the "main" function scope.
@@ -740,7 +732,9 @@ fn create_ecalli_program_blob(ecalli_index: u32) -> Vec<u8> {
         ],
         &[],
     );
-    builder.into_vec().expect("failed to build ecalli program blob")
+    builder
+        .into_vec()
+        .expect("failed to build ecalli program blob")
 }
 
 #[test]
@@ -756,14 +750,15 @@ fn test_ecalli_generates_call_and_return_events() {
     let events = load_trace_events(&out_dir);
 
     // There should be a Call event with function name "seal_input".
-    let call_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e.get("Call").is_some())
-        .collect();
+    let call_events: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e.get("Call").is_some()).collect();
     assert!(
         !call_events.is_empty(),
         "trace should contain a Call event for the ecalli, got events: {:?}",
-        events.iter().map(|e| e.as_object().unwrap().keys().next().unwrap().clone()).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| e.as_object().unwrap().keys().next().unwrap().clone())
+            .collect::<Vec<_>>()
     );
 
     // There should be Return events (at least one from the ecalli, one from program end).
@@ -800,10 +795,8 @@ fn test_unknown_ecalli_halts_execution() {
     let events = load_trace_events(&out_dir);
 
     // A Call event should still be emitted for the unknown ecalli.
-    let call_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e.get("Call").is_some())
-        .collect();
+    let call_events: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e.get("Call").is_some()).collect();
     assert!(
         !call_events.is_empty(),
         "trace should contain a Call event even for unknown ecalli"
@@ -830,17 +823,19 @@ fn test_multiple_ecalli_calls() {
     builder.set_code(
         &[
             asm::load_imm(A0, 1),
-            asm::ecalli(0),   // seal_input
+            asm::ecalli(0), // seal_input
             asm::load_imm(A0, 2),
-            asm::ecalli(2),   // seal_caller
+            asm::ecalli(2), // seal_caller
             asm::load_imm(A0, 3),
-            asm::ecalli(5),   // seal_get_storage
+            asm::ecalli(5), // seal_get_storage
             asm::load_imm(A0, 42),
             asm::ret(),
         ],
         &[],
     );
-    let blob = builder.into_vec().expect("failed to build multi-ecalli blob");
+    let blob = builder
+        .into_vec()
+        .expect("failed to build multi-ecalli blob");
 
     let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let out_dir = tmp_dir.path().join("traces");

@@ -195,8 +195,8 @@ fn parse_selector_hex(hex_str: &str) -> Result<[u8; 4]> {
 /// message name (as UTF-8 bytes). This matches the `#[ink(message)]`
 /// default selector computation.
 pub fn encode_message_selector(name: &str) -> [u8; 4] {
-    use blake2::digest::typenum::U32;
     use blake2::digest::Digest;
+    use blake2::digest::typenum::U32;
     let hash = blake2::Blake2b::<U32>::digest(name.as_bytes());
     [hash[0], hash[1], hash[2], hash[3]]
 }
@@ -262,11 +262,7 @@ impl InkHostHandler {
 }
 
 impl HostFunctionHandler for InkHostHandler {
-    fn handle_ecalli(
-        &mut self,
-        index: u32,
-        instance: &mut polkavm::RawInstance,
-    ) -> bool {
+    fn handle_ecalli(&mut self, index: u32, instance: &mut polkavm::RawInstance) -> bool {
         use polkavm::Reg;
 
         match index {
@@ -484,7 +480,10 @@ mod tests {
 
         // Insert a key.
         handler.set_storage(vec![1, 2, 3], vec![10, 20, 30]);
-        assert_eq!(handler.storage().get(&vec![1, 2, 3]), Some(&vec![10, 20, 30]));
+        assert_eq!(
+            handler.storage().get(&vec![1, 2, 3]),
+            Some(&vec![10, 20, 30])
+        );
 
         // Overwrite.
         handler.set_storage(vec![1, 2, 3], vec![99]);

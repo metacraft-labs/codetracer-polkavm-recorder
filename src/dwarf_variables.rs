@@ -92,11 +92,8 @@ impl DwarfVariableInfo {
                         // Use the outermost (first) frame for function name -
                         // this gives us the actual function, not inlined callees.
                         if let Some(frame) = region_info.frames().next() {
-                            if let Ok(Some(func_name)) =
-                                frame.function_name_without_namespace()
-                            {
-                                frame_functions
-                                    .insert(pc.0, func_name.to_string());
+                            if let Ok(Some(func_name)) = frame.function_name_without_namespace() {
+                                frame_functions.insert(pc.0, func_name.to_string());
                             }
                         }
                         break;
@@ -122,9 +119,7 @@ impl DwarfVariableInfo {
     /// Find the function containing the given program counter.
     pub fn function_at(&self, pc: ProgramCounter) -> Option<&FunctionInfo> {
         // Binary search for the function whose range contains this PC.
-        let idx = self
-            .functions
-            .partition_point(|f| f.start_pc <= pc.0);
+        let idx = self.functions.partition_point(|f| f.start_pc <= pc.0);
         if idx == 0 {
             return None;
         }
@@ -155,18 +150,12 @@ impl DwarfVariableInfo {
     ///
     /// Returns `None` if no function context is available at this PC,
     /// meaning the caller should fall back to raw register names.
-    pub fn resolve_register_name(
-        &self,
-        pc: ProgramCounter,
-        register_name: &str,
-    ) -> Option<String> {
+    pub fn resolve_register_name(&self, pc: ProgramCounter, register_name: &str) -> Option<String> {
         // Only rename argument registers within known function scopes.
         let _func = self.function_at(pc).or_else(|| {
             // If we have frame function info for this PC, treat it as
             // being inside a function even without export boundaries.
-            self.frame_functions
-                .get(&pc.0)
-                .and(self.functions.first())
+            self.frame_functions.get(&pc.0).and(self.functions.first())
         })?;
 
         // Map A0-A5 to arg0-arg5 based on RISC-V calling convention.
@@ -185,11 +174,7 @@ impl DwarfVariableInfo {
     ///
     /// Returns the resolved variable name if available (e.g., "arg0"),
     /// or the original register name as fallback (e.g., "A0").
-    pub fn display_name_for_register(
-        &self,
-        pc: ProgramCounter,
-        register_name: &str,
-    ) -> String {
+    pub fn display_name_for_register(&self, pc: ProgramCounter, register_name: &str) -> String {
         self.resolve_register_name(pc, register_name)
             .unwrap_or_else(|| register_name.to_string())
     }
@@ -255,10 +240,7 @@ mod tests {
         // PC 5 is in "main"
         assert_eq!(info.function_at(ProgramCounter(5)).unwrap().name, "main");
         // PC 10 is in "helper"
-        assert_eq!(
-            info.function_at(ProgramCounter(10)).unwrap().name,
-            "helper"
-        );
+        assert_eq!(info.function_at(ProgramCounter(10)).unwrap().name, "helper");
         // PC 20 is past "helper"
         assert!(info.function_at(ProgramCounter(20)).is_none());
     }
@@ -305,22 +287,15 @@ mod tests {
 
     #[test]
     fn test_from_blob_with_exports() {
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
         builder.set_stack_size(4096);
         builder.add_export_by_basic_block(0, b"main");
-        builder.set_code(
-            &[
-                asm::load_imm(A0, 42),
-                asm::ret(),
-            ],
-            &[],
-        );
+        builder.set_code(&[asm::load_imm(A0, 42), asm::ret()], &[]);
         let blob_bytes = builder.into_vec().expect("failed to build blob");
-        let blob = ProgramBlob::parse(blob_bytes.into())
-            .expect("failed to parse blob");
+        let blob = ProgramBlob::parse(blob_bytes.into()).expect("failed to parse blob");
 
         let info = DwarfVariableInfo::from_blob(&blob);
 

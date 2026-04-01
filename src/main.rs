@@ -158,10 +158,7 @@ fn main() -> Result<()> {
         Commands::TraceInk(args) => trace_ink(args),
         Commands::Replay(args) => replay(args),
         Commands::Version => {
-            println!(
-                "codetracer-polkavm-recorder {}",
-                env!("CARGO_PKG_VERSION")
-            );
+            println!("codetracer-polkavm-recorder {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
     }
@@ -229,7 +226,10 @@ fn trace_ink(args: TraceInkArgs) -> Result<()> {
     let selector = encode_message_selector(&args.message);
     eprintln!(
         "Message selector: 0x{}",
-        selector.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        selector
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
     );
 
     let format = match args.format {

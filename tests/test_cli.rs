@@ -19,10 +19,7 @@ fn test_help_flag() {
 
 #[test]
 fn test_version_subcommand() {
-    let output = cargo_bin()
-        .arg("version")
-        .output()
-        .expect("failed to run");
+    let output = cargo_bin().arg("version").output().expect("failed to run");
     assert!(output.status.success(), "version should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -65,10 +62,7 @@ fn test_record_invalid_blob() {
     std::fs::write(&invalid_file, b"this is not a polkavm blob").expect("failed to write");
 
     let output = cargo_bin()
-        .args([
-            "record",
-            invalid_file.to_str().unwrap(),
-        ])
+        .args(["record", invalid_file.to_str().unwrap()])
         .output()
         .expect("failed to run");
 

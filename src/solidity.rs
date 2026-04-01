@@ -334,7 +334,7 @@ mod tests {
     fn test_detect_solidity_blob_negative_with_rust_blob() {
         // A blob with a `main` export (typical Rust program) should not be
         // detected as Solidity.
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn test_detect_solidity_blob_positive_with_call_export() {
         // A blob with `call` export and no `main` should be detected.
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn test_detect_solidity_blob_positive_with_deploy_export() {
         // A blob with `deploy` export and no `main` should be detected.
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -392,7 +392,7 @@ mod tests {
     fn test_detect_solidity_blob_negative_with_call_and_main() {
         // A blob with both `call` and `main` should NOT be detected
         // (ambiguous — could be a Rust program that happens to export `call`).
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_parse_resolc_debug_info_returns_none_for_rust_blob() {
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_parse_resolc_debug_info_returns_some_for_solidity_blob() {
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -500,7 +500,10 @@ mod tests {
             solidity_host_function_alias("seal_balance"),
             Some("BALANCE")
         );
-        assert_eq!(solidity_host_function_alias("seal_input"), Some("CALLDATALOAD"));
+        assert_eq!(
+            solidity_host_function_alias("seal_input"),
+            Some("CALLDATALOAD")
+        );
         assert_eq!(solidity_host_function_alias("seal_return"), Some("RETURN"));
     }
 
@@ -520,10 +523,7 @@ mod tests {
             solidity_ecalli_display_name("seal_set_storage"),
             "SSTORE (seal_set_storage)"
         );
-        assert_eq!(
-            solidity_ecalli_display_name("unknown_fn"),
-            "unknown_fn"
-        );
+        assert_eq!(solidity_ecalli_display_name("unknown_fn"), "unknown_fn");
     }
 
     // -- Rust blob still works with existing infrastructure -----------------
@@ -535,16 +535,13 @@ mod tests {
         use crate::dwarf_variables::DwarfVariableInfo;
         use crate::source_map::SourceMapper;
 
-        use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+        use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
         use polkavm_common::writer::ProgramBlobBuilder;
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
         builder.set_stack_size(4096);
         builder.add_export_by_basic_block(0, b"main");
-        builder.set_code(
-            &[asm::load_imm(A0, 42), asm::ret()],
-            &[],
-        );
+        builder.set_code(&[asm::load_imm(A0, 42), asm::ret()], &[]);
         let blob_bytes = builder.into_vec().expect("build blob");
         let blob = ProgramBlob::parse(blob_bytes.into()).expect("parse blob");
 
