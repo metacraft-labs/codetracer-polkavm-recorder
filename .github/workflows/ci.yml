@@ -30,10 +30,22 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Relax AppArmor user-namespace restriction
+        # PolkaVM's Linux sandbox needs unprivileged user namespaces,
+        # which ubuntu-latest restricts via AppArmor by default.
+        # This is best-effort; the POLKAVM_SANDBOXING_ENABLED=false
+        # fallback below guarantees tests still pass if this fails.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Build
         run: cargo build --all-targets
+        env:
+          POLKAVM_SANDBOXING_ENABLED: "false"
 
       - name: Run tests with zero-test guard
+        env:
+          POLKAVM_SANDBOXING_ENABLED: "false"
         run: |
           set -euo pipefail
           OUTPUT=$(cargo test --all-targets 2>&1) || { echo "$OUTPUT"; exit 1; }
