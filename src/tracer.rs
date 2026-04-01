@@ -11,6 +11,9 @@ use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
 use polkavm::{Config, Engine, InterruptKind, ModuleConfig, Module, ProgramBlob, Reg};
 
+use crate::dwarf_variables::DwarfVariableInfo;
+use crate::host_functions::{self, HostFunctionHandler, NoOpHostFunctionHandler};
+use crate::solidity;
 use crate::source_map::SourceMapper;
 
 /// The main tracer struct that captures PolkaVM execution traces.
@@ -18,6 +21,10 @@ pub struct PolkaVmTracer {
     writer: Box<dyn TraceWriter + Send>,
     /// PolkaVM register value type id (registered once).
     reg_type_id: Option<codetracer_trace_types::TypeId>,
+    /// Handler for Ecalli (host function) calls.
+    host_handler: Box<dyn HostFunctionHandler>,
+    /// Whether the current blob is a Solidity-via-Revive contract.
+    is_solidity: bool,
 }
 
 impl PolkaVmTracer {
@@ -37,8 +44,23 @@ impl PolkaVmTracer {
         let blob = ProgramBlob::parse(blob_bytes.to_vec().into())
             .map_err(|e| eyre!("failed to parse program blob: {e}"))?;
 
-        // -- 2. Build the source mapper from debug info ----------------------------------
+        // -- 2. Detect Solidity blobs and build source mapper/variable info ----------------
+        let is_solidity = solidity::detect_solidity_blob(&blob);
+        if is_solidity {
+            eprintln!("Detected Solidity-via-Revive contract blob");
+        }
+
+        // When a Solidity blob has debug info, parse the enriched source map.
+        // The standard SourceMapper works for both Rust and Solidity blobs since
+        // PolkaVM's LineProgram format is compiler-agnostic.
+        let _solidity_source_map = if is_solidity {
+            solidity::parse_resolc_debug_info(&blob)
+        } else {
+            None
+        };
+
         let source_mapper = SourceMapper::from_blob(&blob);
+        let variable_info = DwarfVariableInfo::from_blob(&blob);
 
         // -- 3. Create engine and module with step tracing -------------------------------
         let engine_config = Config::new();
@@ -52,17 +74,29 @@ impl PolkaVmTracer {
             .map_err(|e| eyre!("failed to compile module: {e}"))?;
 
         // -- 4. Find entry point ---------------------------------------------------------
-        let entry_point = module
-            .exports()
-            .find(|export| export == "main")
-            .map(|e| e.program_counter())
-            .ok_or_else(|| eyre!("no 'main' export found in program blob"))?;
+        // Solidity blobs use `call` (runtime) or `deploy` (constructor) exports;
+        // Rust blobs use `main`.
+        let entry_point = if is_solidity {
+            module
+                .exports()
+                .find(|export| export == "call" || export == "deploy")
+                .map(|e| e.program_counter())
+                .ok_or_else(|| eyre!("no 'call' or 'deploy' export found in Solidity blob"))?
+        } else {
+            module
+                .exports()
+                .find(|export| export == "main")
+                .map(|e| e.program_counter())
+                .ok_or_else(|| eyre!("no 'main' export found in program blob"))?
+        };
 
         // -- 5. Create the trace writer --------------------------------------------------
         let program_str = blob_path.to_string_lossy();
         let mut tracer = PolkaVmTracer {
             writer: create_trace_writer(&program_str, &[], format),
             reg_type_id: None,
+            host_handler: Box::new(NoOpHostFunctionHandler),
+            is_solidity,
         };
 
         // -- 6. Initialise output files --------------------------------------------------
@@ -94,7 +128,7 @@ impl PolkaVmTracer {
 
         instance.prepare_call_typed(entry_point, ());
 
-        tracer.run_step_loop(&mut instance, &source_mapper, blob_path)?;
+        tracer.run_step_loop(&mut instance, &source_mapper, &variable_info, blob_path)?;
 
         // -- 9. Finish writing -----------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer)
@@ -112,6 +146,7 @@ impl PolkaVmTracer {
         &mut self,
         instance: &mut polkavm::RawInstance,
         source_mapper: &SourceMapper,
+        variable_info: &DwarfVariableInfo,
         blob_path: &Path,
     ) -> Result<()> {
         let reg_type_id = self.reg_type_id.unwrap();
@@ -147,8 +182,9 @@ impl PolkaVmTracer {
                         prev_line = Some(line);
                     }
 
-                    // Emit register values as variables.
-                    self.emit_register_values(instance, reg_type_id);
+                    // Emit register values as variables, using resolved
+                    // names when debug info is available.
+                    self.emit_register_values(instance, reg_type_id, pc, variable_info);
                 }
                 InterruptKind::Finished => {
                     // Emit the final return.
@@ -170,15 +206,46 @@ impl PolkaVmTracer {
                     break;
                 }
                 InterruptKind::Ecalli(index) => {
+                    let seal_name = host_functions::ecalli_display_name(index);
+                    let display_name = if self.is_solidity {
+                        solidity::solidity_ecalli_display_name(&seal_name)
+                    } else {
+                        seal_name.clone()
+                    };
                     eprintln!(
-                        "External call {} at step {} (pc: {:?})",
+                        "Host function {}({}) at step {} (pc: {:?})",
+                        display_name,
                         index,
                         step_count,
                         instance.program_counter()
                     );
-                    // For now, treat unhandled ecalli as a trap.
-                    // In a full implementation, host functions would be handled here.
-                    break;
+
+                    // Emit a Call event for the host function.
+                    let fn_id = TraceWriter::ensure_function_id(
+                        &mut *self.writer,
+                        &display_name,
+                        blob_path,
+                        Line(0),
+                    );
+                    TraceWriter::register_call(
+                        &mut *self.writer,
+                        fn_id,
+                        vec![],
+                    );
+
+                    // Let the host function handler decide whether to continue.
+                    let handled = self.host_handler.handle_ecalli(index, instance);
+
+                    // Emit a Return event after the host function.
+                    TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
+
+                    if !handled {
+                        eprintln!(
+                            "Unhandled host function {}({}) — halting execution",
+                            display_name, index
+                        );
+                        break;
+                    }
                 }
                 InterruptKind::Segfault(_segfault) => {
                     eprintln!(
@@ -201,10 +268,16 @@ impl PolkaVmTracer {
     }
 
     /// Emit the current register values as trace variables.
+    ///
+    /// When `variable_info` provides resolved names for registers at the
+    /// current PC (e.g., "arg0" instead of "A0"), those names are used.
+    /// Otherwise, raw register names are emitted as fallback.
     fn emit_register_values(
         &mut self,
         instance: &polkavm::RawInstance,
         reg_type_id: codetracer_trace_types::TypeId,
+        pc: polkavm_common::program::ProgramCounter,
+        variable_info: &DwarfVariableInfo,
     ) {
         // Emit argument registers (A0-A5) and saved registers (S0-S1).
         let registers = [
@@ -223,15 +296,17 @@ impl PolkaVmTracer {
             (Reg::RA, "RA"),
         ];
 
-        for (reg, name) in &registers {
+        for (reg, raw_name) in &registers {
             let val = instance.reg(*reg);
+            let display_name =
+                variable_info.display_name_for_register(pc, raw_name);
             let value = ValueRecord::Int {
                 i: val as i64,
                 type_id: reg_type_id,
             };
             TraceWriter::register_variable_with_full_value(
                 &mut *self.writer,
-                name,
+                &display_name,
                 value,
             );
         }

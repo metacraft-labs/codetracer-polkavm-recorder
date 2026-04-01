@@ -215,26 +215,27 @@ fn test_polkavm_compute_value_at_return() {
     let events = load_trace_events(&out_dir);
 
     // The compute program calculates: (10 + 32) * 2 + 10 = 94
-    // At the end, A0 should contain 94.
-    let a0_values = find_register_values(&events, "A0");
+    // At the end, arg0 (A0) should contain 94.
+    // (A0 is renamed to arg0 within the "main" function scope)
+    let arg0_values = find_register_values(&events, "arg0");
     assert!(
-        !a0_values.is_empty(),
-        "should have A0 register values in the trace"
+        !arg0_values.is_empty(),
+        "should have arg0 (A0) values in the trace"
     );
 
-    // Verify that A0 contains 94 at some point (the final computed result).
+    // Verify that arg0 contains 94 at some point (the final computed result).
     assert!(
-        a0_values.contains(&94),
-        "A0 should contain 94 (the final result of (10+32)*2+10) at some step, got values: {:?}",
-        a0_values
+        arg0_values.contains(&94),
+        "arg0 should contain 94 (the final result of (10+32)*2+10) at some step, got values: {:?}",
+        arg0_values
     );
 
     // Also verify intermediate values appear:
-    // After load_imm(A0, 10), A0 = 10
+    // After load_imm(A0, 10), arg0 = 10
     assert!(
-        a0_values.contains(&10),
-        "A0 should contain 10 (initial load) at some step, got values: {:?}",
-        a0_values
+        arg0_values.contains(&10),
+        "arg0 should contain 10 (initial load) at some step, got values: {:?}",
+        arg0_values
     );
 
     // S0 should contain 42 (sum = 10 + 32)
@@ -269,37 +270,38 @@ fn test_polkavm_register_values_captured() {
 
     let events = load_trace_events(&out_dir);
 
-    // The add program: A0 = 10, A1 = 32, A0 = A0 + A1 = 42
-    let a0_values = find_register_values(&events, "A0");
-    let a1_values = find_register_values(&events, "A1");
+    // The add program: arg0 = 10, arg1 = 32, arg0 = arg0 + arg1 = 42
+    // (A0/A1 are renamed to arg0/arg1 within the "main" function scope)
+    let arg0_values = find_register_values(&events, "arg0");
+    let arg1_values = find_register_values(&events, "arg1");
 
-    // A0 should have value 10 at some point (after first load_imm).
+    // arg0 should have value 10 at some point (after first load_imm).
     assert!(
-        a0_values.contains(&10),
-        "A0 should contain 10 at some step, got: {:?}",
-        a0_values
+        arg0_values.contains(&10),
+        "arg0 should contain 10 at some step, got: {:?}",
+        arg0_values
     );
 
-    // A1 should have value 32 at some point (after second load_imm).
+    // arg1 should have value 32 at some point (after second load_imm).
     assert!(
-        a1_values.contains(&32),
-        "A1 should contain 32 at some step, got: {:?}",
-        a1_values
+        arg1_values.contains(&32),
+        "arg1 should contain 32 at some step, got: {:?}",
+        arg1_values
     );
 
-    // A0 should have value 42 at some point (after add).
+    // arg0 should have value 42 at some point (after add).
     assert!(
-        a0_values.contains(&42),
-        "A0 should contain 42 (10+32) at some step, got: {:?}",
-        a0_values
+        arg0_values.contains(&42),
+        "arg0 should contain 42 (10+32) at some step, got: {:?}",
+        arg0_values
     );
 
-    // A0=42 should appear after A0=10 in the trace (ordering matters).
-    let first_10_pos = a0_values.iter().position(|&v| v == 10).unwrap();
-    let first_42_pos = a0_values.iter().position(|&v| v == 42).unwrap();
+    // arg0=42 should appear after arg0=10 in the trace (ordering matters).
+    let first_10_pos = arg0_values.iter().position(|&v| v == 10).unwrap();
+    let first_42_pos = arg0_values.iter().position(|&v| v == 42).unwrap();
     assert!(
         first_42_pos > first_10_pos,
-        "A0=42 should appear after A0=10 in the trace (10 at index {}, 42 at index {})",
+        "arg0=42 should appear after arg0=10 in the trace (10 at index {}, 42 at index {})",
         first_10_pos,
         first_42_pos
     );
@@ -447,13 +449,15 @@ fn test_polkavm_register_names_emitted() {
     let events = load_trace_events(&out_dir);
     let var_names = collect_variable_names(&events);
 
-    // The tracer should emit register names for A0-A5, S0-S1, T0-T2, SP, RA.
-    let expected_registers = ["A0", "A1", "A2", "A3", "A4", "A5", "S0", "S1", "T0", "T1", "T2", "SP", "RA"];
-    for reg_name in &expected_registers {
+    // The tracer emits resolved variable names when debug info is available.
+    // Within a function scope (like "main"), A0-A5 are renamed to arg0-arg5.
+    // Non-argument registers keep their raw names: S0-S1, T0-T2, SP, RA.
+    let expected_names = ["arg0", "arg1", "arg2", "arg3", "arg4", "arg5", "S0", "S1", "T0", "T1", "T2", "SP", "RA"];
+    for name in &expected_names {
         assert!(
-            var_names.contains(&reg_name.to_string()),
-            "register {} should appear in VariableName events, got names: {:?}",
-            reg_name,
+            var_names.contains(&name.to_string()),
+            "variable {} should appear in VariableName events, got names: {:?}",
+            name,
             var_names
         );
     }
@@ -595,10 +599,279 @@ fn test_polkavm_cli_record_with_blob() {
     );
 
     // Verify register values were captured through CLI too.
-    let a0_values = find_register_values(&events, "A0");
+    // A0 is renamed to arg0 within the "main" function scope.
+    let arg0_values = find_register_values(&events, "arg0");
     assert!(
-        a0_values.contains(&42),
-        "CLI trace should capture A0=42 (10+32), got: {:?}",
-        a0_values
+        arg0_values.contains(&42),
+        "CLI trace should capture arg0=42 (10+32), got: {:?}",
+        arg0_values
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: Variable name resolution - arg registers renamed in function scope
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_polkavm_variable_names_resolved() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let blob = create_add_program_blob();
+    run_tracer_on_blob(&blob, &out_dir);
+
+    let events = load_trace_events(&out_dir);
+    let var_names = collect_variable_names(&events);
+
+    // Within the "main" function, A0-A5 should be renamed to arg0-arg5.
+    assert!(
+        var_names.contains(&"arg0".to_string()),
+        "arg0 should appear (A0 renamed within function scope), got: {:?}",
+        var_names
+    );
+    assert!(
+        var_names.contains(&"arg1".to_string()),
+        "arg1 should appear (A1 renamed within function scope), got: {:?}",
+        var_names
+    );
+
+    // Non-argument registers should keep their original names.
+    assert!(
+        var_names.contains(&"S0".to_string()),
+        "S0 should keep its raw name, got: {:?}",
+        var_names
+    );
+    assert!(
+        var_names.contains(&"SP".to_string()),
+        "SP should keep its raw name, got: {:?}",
+        var_names
+    );
+    assert!(
+        var_names.contains(&"RA".to_string()),
+        "RA should keep its raw name, got: {:?}",
+        var_names
+    );
+
+    // The raw register names A0-A5 should NOT appear (they are renamed).
+    assert!(
+        !var_names.contains(&"A0".to_string()),
+        "A0 should not appear (renamed to arg0), got: {:?}",
+        var_names
+    );
+    assert!(
+        !var_names.contains(&"A1".to_string()),
+        "A1 should not appear (renamed to arg1), got: {:?}",
+        var_names
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: Variable values accessible via resolved names
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_polkavm_variable_values_via_resolved_names() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let blob = create_compute_program_blob();
+    run_tracer_on_blob(&blob, &out_dir);
+
+    let events = load_trace_events(&out_dir);
+
+    // The compute program: arg0 = 10, arg1 = 32, S0 = 42, S1 = 84, arg0 = 94
+    let arg0_values = find_register_values(&events, "arg0");
+    let arg1_values = find_register_values(&events, "arg1");
+
+    // arg0 should show the progression: 10 -> 94
+    assert!(
+        arg0_values.contains(&10),
+        "arg0 should contain initial value 10, got: {:?}",
+        arg0_values
+    );
+    assert!(
+        arg0_values.contains(&94),
+        "arg0 should contain final value 94, got: {:?}",
+        arg0_values
+    );
+
+    // arg1 should contain 32
+    assert!(
+        arg1_values.contains(&32),
+        "arg1 should contain 32, got: {:?}",
+        arg1_values
+    );
+
+    // S0 and S1 keep their register names (not argument registers)
+    let s0_values = find_register_values(&events, "S0");
+    let s1_values = find_register_values(&events, "S1");
+    assert!(
+        s0_values.contains(&42),
+        "S0 should contain 42, got: {:?}",
+        s0_values
+    );
+    assert!(
+        s1_values.contains(&84),
+        "S1 should contain 84, got: {:?}",
+        s1_values
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: Ecalli generates Call and Return events in the trace
+// ---------------------------------------------------------------------------
+
+/// Helper: create a program that makes a known ecalli call (seal_input, index 0)
+/// then continues and returns.
+///
+/// The program: load 10 into A0, ecalli 0 (seal_input), load 20 into A0, ret.
+fn create_ecalli_program_blob(ecalli_index: u32) -> Vec<u8> {
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    builder.set_stack_size(4096);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm(A0, 10),
+            asm::ecalli(ecalli_index),
+            asm::load_imm(A0, 20),
+            asm::ret(),
+        ],
+        &[],
+    );
+    builder.into_vec().expect("failed to build ecalli program blob")
+}
+
+#[test]
+fn test_ecalli_generates_call_and_return_events() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    // Use ecalli index 0 = seal_input (a known host function).
+    let blob = create_ecalli_program_blob(0);
+    run_tracer_on_blob(&blob, &out_dir);
+
+    let events = load_trace_events(&out_dir);
+
+    // There should be a Call event with function name "seal_input".
+    let call_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e.get("Call").is_some())
+        .collect();
+    assert!(
+        !call_events.is_empty(),
+        "trace should contain a Call event for the ecalli, got events: {:?}",
+        events.iter().map(|e| e.as_object().unwrap().keys().next().unwrap().clone()).collect::<Vec<_>>()
+    );
+
+    // There should be Return events (at least one from the ecalli, one from program end).
+    let return_count = events.iter().filter(|e| e.get("Return").is_some()).count();
+    assert!(
+        return_count >= 2,
+        "should have at least 2 Return events (one for ecalli, one for program end), got {}",
+        return_count
+    );
+
+    // Execution should continue after the ecalli: arg0 should have value 20.
+    let arg0_values = find_register_values(&events, "arg0");
+    assert!(
+        arg0_values.contains(&20),
+        "arg0 should contain 20 (loaded after ecalli), got: {:?}",
+        arg0_values
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: Unknown ecalli halts execution
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unknown_ecalli_halts_execution() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    // Use ecalli index 999 (unknown host function).
+    let blob = create_ecalli_program_blob(999);
+    run_tracer_on_blob(&blob, &out_dir);
+
+    let events = load_trace_events(&out_dir);
+
+    // A Call event should still be emitted for the unknown ecalli.
+    let call_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e.get("Call").is_some())
+        .collect();
+    assert!(
+        !call_events.is_empty(),
+        "trace should contain a Call event even for unknown ecalli"
+    );
+
+    // Execution should halt after the unknown ecalli, so arg0 should NOT have value 20.
+    let arg0_values = find_register_values(&events, "arg0");
+    assert!(
+        !arg0_values.contains(&20),
+        "arg0 should NOT contain 20 (execution halted at unknown ecalli), got: {:?}",
+        arg0_values
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: Multiple ecalli calls generate multiple Call/Return pairs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_multiple_ecalli_calls() {
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    builder.set_stack_size(4096);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm(A0, 1),
+            asm::ecalli(0),   // seal_input
+            asm::load_imm(A0, 2),
+            asm::ecalli(2),   // seal_caller
+            asm::load_imm(A0, 3),
+            asm::ecalli(5),   // seal_get_storage
+            asm::load_imm(A0, 42),
+            asm::ret(),
+        ],
+        &[],
+    );
+    let blob = builder.into_vec().expect("failed to build multi-ecalli blob");
+
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    run_tracer_on_blob(&blob, &out_dir);
+
+    let events = load_trace_events(&out_dir);
+
+    // Should have at least 3 Call events for the ecalli calls
+    // (there may also be a Call for "main" from the trace start).
+    let call_count = events.iter().filter(|e| e.get("Call").is_some()).count();
+    assert!(
+        call_count >= 3,
+        "should have at least 3 Call events for 3 ecalli calls, got {}",
+        call_count
+    );
+
+    // Should have at least 4 Return events (3 from ecalli + 1 from program end).
+    let return_count = events.iter().filter(|e| e.get("Return").is_some()).count();
+    assert!(
+        return_count >= 4,
+        "should have at least 4 Return events (3 ecalli + 1 program end), got {}",
+        return_count
+    );
+
+    // Execution completed successfully: arg0 should contain 42.
+    let arg0_values = find_register_values(&events, "arg0");
+    assert!(
+        arg0_values.contains(&42),
+        "arg0 should contain 42 (final value), got: {:?}",
+        arg0_values
     );
 }
