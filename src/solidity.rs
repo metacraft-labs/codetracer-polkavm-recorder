@@ -90,14 +90,14 @@ pub fn detect_solidity_blob(blob: &ProgramBlob) -> bool {
 fn has_solidity_debug_paths(blob: &ProgramBlob) -> bool {
     for parsed in blob.instructions() {
         let pc = parsed.offset;
-        if let Ok(Some(mut line_program)) = blob.get_debug_line_program_at(pc) {
-            if let Ok(Some(region_info)) = line_program.run() {
-                for frame in region_info.frames() {
-                    if let Ok(Some(path)) = frame.path()
-                        && path.ends_with(".sol")
-                    {
-                        return true;
-                    }
+        if let Ok(Some(mut line_program)) = blob.get_debug_line_program_at(pc)
+            && let Ok(Some(region_info)) = line_program.run()
+        {
+            for frame in region_info.frames() {
+                if let Ok(Some(path)) = frame.path()
+                    && path.ends_with(".sol")
+                {
+                    return true;
                 }
             }
         }
