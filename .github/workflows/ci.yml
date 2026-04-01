@@ -39,7 +39,7 @@ jobs:
           OUTPUT=$(cargo test --all-targets 2>&1) || { echo "$OUTPUT"; exit 1; }
           echo "$OUTPUT"
           # Guard against silently empty test suites
-          if echo "$OUTPUT" | grep -qP "^test result:.*0 passed"; then
+          if ! echo "$OUTPUT" | grep -qP "test result: ok\. [1-9]"; then
             echo "::error::Zero tests passed — check that test binaries are compiling correctly"
             exit 1
           fi
