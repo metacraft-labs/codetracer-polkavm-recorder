@@ -169,7 +169,7 @@ impl PolkaVmTracer {
                     // Try to resolve source location from debug info.
                     let (source_path, line) = source_mapper
                         .resolve(pc)
-                        .unwrap_or_else(|| (blob_path, pc.0 as u32 + 1));
+                        .unwrap_or_else(|| (blob_path, pc.0 + 1));
 
                     // Emit step if line changed.
                     if prev_line != Some(line) {
