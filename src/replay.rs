@@ -84,10 +84,7 @@ pub struct ContractCode {
 ///
 /// **Note**: This is currently a placeholder. The real implementation will
 /// use `jsonrpsee` or `subxt` to make the RPC calls.
-pub fn fetch_contract_code(
-    _client: &SubstrateRpcClient,
-    _address: &str,
-) -> Result<ContractCode> {
+pub fn fetch_contract_code(_client: &SubstrateRpcClient, _address: &str) -> Result<ContractCode> {
     // TODO(M8): Implement actual Substrate RPC calls:
     //   1. contracts_getContractInfo(address, block_hash) -> { code_hash, ... }
     //   2. contracts_getContractCode(code_hash) -> Vec<u8>
@@ -102,10 +99,7 @@ pub fn fetch_contract_code(
 /// This wrapper tries `fetch_contract_code` first; if the real RPC is not
 /// available it falls back to reading a local blob file when the address
 /// looks like a file path (useful during development).
-fn fetch_or_load_contract_code(
-    client: &SubstrateRpcClient,
-    address: &str,
-) -> Result<ContractCode> {
+fn fetch_or_load_contract_code(client: &SubstrateRpcClient, address: &str) -> Result<ContractCode> {
     // Try the real RPC first.
     match fetch_contract_code(client, address) {
         Ok(code) => Ok(code),
@@ -326,11 +320,7 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().unwrap();
-        let result = replay_contract_call(
-            &config,
-            tmp.path(),
-            TraceEventsFileFormat::Json,
-        );
+        let result = replay_contract_call(&config, tmp.path(), TraceEventsFileFormat::Json);
 
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());

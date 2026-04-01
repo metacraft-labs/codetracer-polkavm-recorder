@@ -63,11 +63,7 @@ pub fn ecalli_display_name(index: u32) -> String {
 pub trait HostFunctionHandler {
     /// Handle an Ecalli call. Returns `true` if the call was handled
     /// and execution should continue, `false` to halt.
-    fn handle_ecalli(
-        &mut self,
-        index: u32,
-        instance: &mut polkavm::RawInstance,
-    ) -> bool;
+    fn handle_ecalli(&mut self, index: u32, instance: &mut polkavm::RawInstance) -> bool;
 }
 
 /// A default handler that allows all known host functions to proceed
@@ -76,11 +72,7 @@ pub trait HostFunctionHandler {
 pub struct NoOpHostFunctionHandler;
 
 impl HostFunctionHandler for NoOpHostFunctionHandler {
-    fn handle_ecalli(
-        &mut self,
-        index: u32,
-        _instance: &mut polkavm::RawInstance,
-    ) -> bool {
+    fn handle_ecalli(&mut self, index: u32, _instance: &mut polkavm::RawInstance) -> bool {
         resolve_host_function(index).is_some()
     }
 }

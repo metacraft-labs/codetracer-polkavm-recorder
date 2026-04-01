@@ -14,11 +14,7 @@ use crate::tracer::PolkaVmTracer;
 ///
 /// Reads the program blob at `blob_path`, executes it with step tracing,
 /// and writes CodeTracer trace files to `out_dir`.
-pub fn record(
-    blob_path: &Path,
-    out_dir: &Path,
-    format: TraceEventsFileFormat,
-) -> Result<()> {
+pub fn record(blob_path: &Path, out_dir: &Path, format: TraceEventsFileFormat) -> Result<()> {
     let blob_bytes = std::fs::read(blob_path)
         .with_context(|| format!("failed to read blob file: {}", blob_path.display()))?;
 

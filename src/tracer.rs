@@ -5,11 +5,11 @@
 
 use std::path::Path;
 
-use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{Line, NONE_VALUE, TypeKind, ValueRecord};
 use codetracer_trace_writer::trace_writer::TraceWriter;
 use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
-use polkavm::{Config, Engine, InterruptKind, ModuleConfig, Module, ProgramBlob, Reg};
+use polkavm::{Config, Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 
 use crate::dwarf_variables::DwarfVariableInfo;
 use crate::host_functions::{self, HostFunctionHandler, NoOpHostFunctionHandler};
@@ -118,12 +118,12 @@ impl PolkaVmTracer {
         TraceWriter::start(&mut *tracer.writer, blob_path, Line(1));
 
         // Register the "u32/u64" type for register values.
-        let reg_type_id =
-            TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "u64");
+        let reg_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "u64");
         tracer.reg_type_id = Some(reg_type_id);
 
         // -- 8. Instantiate and run with step tracing ------------------------------------
-        let mut instance = module.instantiate()
+        let mut instance = module
+            .instantiate()
             .map_err(|e| eyre!("failed to instantiate module: {e}"))?;
 
         instance.prepare_call_typed(entry_point, ());
@@ -131,12 +131,10 @@ impl PolkaVmTracer {
         tracer.run_step_loop(&mut instance, &source_mapper, &variable_info, blob_path)?;
 
         // -- 9. Finish writing -----------------------------------------------------------
-        TraceWriter::finish_writing_trace_events(&mut *tracer.writer)
-            .map_err(|e| eyre!("{e}"))?;
+        TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
         TraceWriter::finish_writing_trace_metadata(&mut *tracer.writer)
             .map_err(|e| eyre!("{e}"))?;
-        TraceWriter::finish_writing_trace_paths(&mut *tracer.writer)
-            .map_err(|e| eyre!("{e}"))?;
+        TraceWriter::finish_writing_trace_paths(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
 
         Ok(())
     }
@@ -154,7 +152,8 @@ impl PolkaVmTracer {
         let mut prev_line: Option<u32> = None;
 
         loop {
-            let interrupt = instance.run()
+            let interrupt = instance
+                .run()
                 .map_err(|e| eyre!("PolkaVM execution error: {e}"))?;
 
             match interrupt {
@@ -227,11 +226,7 @@ impl PolkaVmTracer {
                         blob_path,
                         Line(0),
                     );
-                    TraceWriter::register_call(
-                        &mut *self.writer,
-                        fn_id,
-                        vec![],
-                    );
+                    TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
 
                     // Let the host function handler decide whether to continue.
                     let handled = self.host_handler.handle_ecalli(index, instance);
@@ -298,17 +293,12 @@ impl PolkaVmTracer {
 
         for (reg, raw_name) in &registers {
             let val = instance.reg(*reg);
-            let display_name =
-                variable_info.display_name_for_register(pc, raw_name);
+            let display_name = variable_info.display_name_for_register(pc, raw_name);
             let value = ValueRecord::Int {
                 i: val as i64,
                 type_id: reg_type_id,
             };
-            TraceWriter::register_variable_with_full_value(
-                &mut *self.writer,
-                &display_name,
-                value,
-            );
+            TraceWriter::register_variable_with_full_value(&mut *self.writer, &display_name, value);
         }
     }
 }
