@@ -78,7 +78,7 @@ fn run_tracer_on_blob(blob_bytes: &[u8], out_dir: &Path) {
 
 /// Helper: parse the trace events JSON from the output directory.
 fn load_trace_events(out_dir: &Path) -> Vec<serde_json::Value> {
-    let events_path = out_dir.join("trace.bin");
+    let events_path = out_dir.join("trace.json");
     let content = std::fs::read_to_string(&events_path).expect("failed to read trace events");
     let events: serde_json::Value =
         serde_json::from_str(&content).expect("trace events should be valid JSON");
@@ -160,14 +160,14 @@ fn test_polkavm_tracer_basic_execution() {
     run_tracer_on_blob(&blob, &out_dir);
 
     // Verify the three output files exist and are non-empty.
-    for filename in &["trace.bin", "trace_metadata.json", "trace_paths.json"] {
+    for filename in &["trace.json", "trace_metadata.json", "trace_paths.json"] {
         let path = out_dir.join(filename);
         assert!(path.exists(), "{} should exist", filename);
         let size = std::fs::metadata(&path).unwrap().len();
         assert!(size > 0, "{} should be non-empty", filename);
     }
 
-    // trace.bin should be valid JSON containing an array of events.
+    // trace.json should be valid JSON containing an array of events.
     let events = load_trace_events(&out_dir);
     assert!(!events.is_empty(), "trace should have at least one event");
 
@@ -516,7 +516,7 @@ fn test_polkavm_tracer_compute_program() {
     run_tracer_on_blob(&blob, &out_dir);
 
     // Verify all three output files exist.
-    assert!(out_dir.join("trace.bin").exists());
+    assert!(out_dir.join("trace.json").exists());
     assert!(out_dir.join("trace_metadata.json").exists());
     assert!(out_dir.join("trace_paths.json").exists());
 
@@ -579,7 +579,7 @@ fn test_polkavm_cli_record_with_blob() {
     );
 
     // Verify output files exist.
-    assert!(out_dir.join("trace.bin").exists());
+    assert!(out_dir.join("trace.json").exists());
     assert!(out_dir.join("trace_metadata.json").exists());
     assert!(out_dir.join("trace_paths.json").exists());
 
@@ -896,8 +896,8 @@ fn export_fixture() {
 
     // Verify the fixture was created.
     assert!(
-        out_dir.join("trace.bin").exists(),
-        "trace.bin should exist in fixture output"
+        out_dir.join("trace.json").exists(),
+        "trace.json should exist in fixture output"
     );
     assert!(
         out_dir.join("trace_metadata.json").exists(),
