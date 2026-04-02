@@ -37,6 +37,8 @@ env:
   NIX_CONFIG: |
     access-tokens = github.com=${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
     accept-flake-config = true
+  # Use the interpreter backend to avoid Linux sandbox clone() failures on CI runners
+  POLKAVM_BACKEND: interpreter
 
 jobs:
   wdio-integration:
