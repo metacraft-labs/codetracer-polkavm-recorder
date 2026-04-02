@@ -870,3 +870,43 @@ fn test_multiple_ecalli_calls() {
         arg0_values
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fixture export: build compute program blob and export trace for WDIO tests
+// ---------------------------------------------------------------------------
+
+/// Export a trace fixture for the VS Code extension's WDIO smoke tests.
+///
+/// This test builds the compute program blob programmatically (avoiding the
+/// need for a RISC-V cross-compiler), records the trace, and writes the
+/// output to the directory specified by `POLKAVM_FIXTURE_OUTPUT_DIR`.
+///
+/// Run with:
+///   POLKAVM_FIXTURE_OUTPUT_DIR=<path> cargo test --test test_tracer -- --ignored export_fixture
+#[test]
+#[ignore]
+fn export_fixture() {
+    let output_dir = std::env::var("POLKAVM_FIXTURE_OUTPUT_DIR")
+        .expect("set POLKAVM_FIXTURE_OUTPUT_DIR to the fixture output directory");
+    let out_dir = Path::new(&output_dir);
+    std::fs::create_dir_all(out_dir).expect("failed to create fixture output directory");
+
+    let blob = create_compute_program_blob();
+    run_tracer_on_blob(&blob, out_dir);
+
+    // Verify the fixture was created.
+    assert!(
+        out_dir.join("trace.bin").exists(),
+        "trace.bin should exist in fixture output"
+    );
+    assert!(
+        out_dir.join("trace_metadata.json").exists(),
+        "trace_metadata.json should exist in fixture output"
+    );
+    assert!(
+        out_dir.join("trace_paths.json").exists(),
+        "trace_paths.json should exist in fixture output"
+    );
+
+    eprintln!("Fixture exported to {}", out_dir.display());
+}
