@@ -63,7 +63,8 @@ impl PolkaVmTracer {
         let variable_info = DwarfVariableInfo::from_blob(&blob);
 
         // -- 3. Create engine and module with step tracing -------------------------------
-        let engine_config = Config::new();
+        let engine_config = Config::from_env()
+            .map_err(|e| eyre!("failed to parse PolkaVM config from environment: {e}"))?;
         let engine = Engine::new(&engine_config)
             .map_err(|e| eyre!("failed to create PolkaVM engine: {e}"))?;
 
