@@ -39,6 +39,8 @@ env:
     accept-flake-config = true
   # Use the interpreter backend to avoid Linux sandbox clone() failures on CI runners
   POLKAVM_BACKEND: interpreter
+  # Allow experimental features (disables security sandbox) — required for tests
+  POLKAVM_ALLOW_EXPERIMENTAL: "1"
 
 jobs:
   wdio-integration:
