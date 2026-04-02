@@ -42,10 +42,12 @@ jobs:
         run: cargo build --all-targets
         env:
           POLKAVM_SANDBOXING_ENABLED: "false"
+          POLKAVM_ALLOW_EXPERIMENTAL: "1"
 
       - name: Run tests with zero-test guard
         env:
           POLKAVM_SANDBOXING_ENABLED: "false"
+          POLKAVM_ALLOW_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
           OUTPUT=$(cargo test --all-targets 2>&1) || { echo "$OUTPUT"; exit 1; }
