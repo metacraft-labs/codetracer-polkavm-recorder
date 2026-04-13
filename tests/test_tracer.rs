@@ -886,10 +886,19 @@ fn test_multiple_ecalli_calls() {
 #[test]
 #[ignore]
 fn export_fixture() {
-    let output_dir = std::env::var("POLKAVM_FIXTURE_OUTPUT_DIR")
-        .expect("set POLKAVM_FIXTURE_OUTPUT_DIR to the fixture output directory");
-    let out_dir = Path::new(&output_dir);
-    std::fs::create_dir_all(out_dir).expect("failed to create fixture output directory");
+    let _tmpdir;
+    let out_dir = match std::env::var("POLKAVM_FIXTURE_OUTPUT_DIR") {
+        Ok(dir) => {
+            let p = Path::new(&dir).to_path_buf();
+            std::fs::create_dir_all(&p).expect("failed to create fixture output directory");
+            p
+        }
+        Err(_) => {
+            _tmpdir = tempfile::tempdir().expect("failed to create temp directory");
+            _tmpdir.path().to_path_buf()
+        }
+    };
+    let out_dir = out_dir.as_path();
 
     let blob = create_compute_program_blob();
     run_tracer_on_blob(&blob, out_dir);
