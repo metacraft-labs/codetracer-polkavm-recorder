@@ -55,8 +55,7 @@ fn main() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output_path = manifest_dir.join("test-programs/rust/flow_test.polkavm");
 
-    std::fs::write(&output_path, &blob_bytes)
-        .expect("failed to write blob");
+    std::fs::write(&output_path, &blob_bytes).expect("failed to write blob");
 
     println!(
         "Wrote {} bytes to {}",
