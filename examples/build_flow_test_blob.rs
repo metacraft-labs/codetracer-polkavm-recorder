@@ -14,7 +14,7 @@
 //! Usage:
 //!   cargo run --example build_flow_test_blob
 
-use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
+use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 fn main() {
@@ -56,7 +56,11 @@ fn main() {
     let output_path = manifest_dir.join("test-programs/rust/flow_test.polkavm");
 
     std::fs::write(&output_path, &blob_bytes)
-        .unwrap_or_else(|e| panic!("failed to write blob to {}: {}", output_path.display(), e));
+        .expect("failed to write blob");
 
-    println!("Wrote {} bytes to {}", blob_bytes.len(), output_path.display());
+    println!(
+        "Wrote {} bytes to {}",
+        blob_bytes.len(),
+        output_path.display()
+    );
 }
