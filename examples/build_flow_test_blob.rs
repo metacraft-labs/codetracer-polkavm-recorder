@@ -14,7 +14,7 @@
 //! Usage:
 //!   cargo run --example build_flow_test_blob
 
-use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 fn main() {
