@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use eyre::{Context, Result, eyre};
+use eyre::{eyre, Context, Result};
 use serde::Deserialize;
 
 use crate::host_functions::HostFunctionHandler;
@@ -195,8 +195,8 @@ fn parse_selector_hex(hex_str: &str) -> Result<[u8; 4]> {
 /// message name (as UTF-8 bytes). This matches the `#[ink(message)]`
 /// default selector computation.
 pub fn encode_message_selector(name: &str) -> [u8; 4] {
-    use blake2::digest::Digest;
     use blake2::digest::typenum::U32;
+    use blake2::digest::Digest;
     let hash = blake2::Blake2b::<U32>::digest(name.as_bytes());
     [hash[0], hash[1], hash[2], hash[3]]
 }

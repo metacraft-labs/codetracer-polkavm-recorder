@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use codetracer_trace_writer::TraceEventsFileFormat;
+use codetracer_trace_writer_nim::TraceEventsFileFormat;
 use eyre::{Context, Result};
 
 use crate::tracer::PolkaVmTracer;
