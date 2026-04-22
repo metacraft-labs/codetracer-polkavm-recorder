@@ -72,7 +72,7 @@ fn run_tracer_on_blob(blob_bytes: &[u8], out_dir: &Path) {
     let blob_path = out_dir.join("test_program.polkavm");
     std::fs::write(&blob_path, blob_bytes).expect("failed to write blob");
 
-    codetracer_polkavm_recorder::recorder::record(&blob_path, out_dir, TraceEventsFileFormat::Json)
+    codetracer_polkavm_recorder::recorder::record(&blob_path, out_dir, TraceEventsFileFormat::Binary)
         .expect("trace_program should succeed");
 }
 
