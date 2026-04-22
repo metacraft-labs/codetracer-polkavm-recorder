@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use codetracer_trace_writer::TraceEventsFileFormat;
+use codetracer_trace_writer_nim::TraceEventsFileFormat;
 use eyre::{Context, Result};
 
 // ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ fn record(args: RecordArgs) -> Result<()> {
 
 /// Execute the `trace-ink` subcommand.
 fn trace_ink(args: TraceInkArgs) -> Result<()> {
-    use codetracer_polkavm_recorder::ink_testing::{InkTestConfig, encode_message_selector};
+    use codetracer_polkavm_recorder::ink_testing::{encode_message_selector, InkTestConfig};
 
     let contract_path = args
         .contract
@@ -258,7 +258,7 @@ fn trace_ink(args: TraceInkArgs) -> Result<()> {
 
 /// Execute the `replay` subcommand.
 fn replay(args: ReplayArgs) -> Result<()> {
-    use codetracer_polkavm_recorder::replay::{ReplayConfig, replay_contract_call};
+    use codetracer_polkavm_recorder::replay::{replay_contract_call, ReplayConfig};
 
     // Parse hex calldata if provided.
     let calldata = if args.calldata.is_empty() {

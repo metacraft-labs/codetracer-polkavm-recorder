@@ -13,11 +13,11 @@
 
 use std::path::{Path, PathBuf};
 
-use codetracer_trace_writer::TraceEventsFileFormat;
-use eyre::{Context, Result, eyre};
+use codetracer_trace_writer_nim::TraceEventsFileFormat;
+use eyre::{eyre, Context, Result};
 use polkavm::ProgramBlob;
 
-use crate::ink_testing::{InkHostHandler, encode_message_selector};
+use crate::ink_testing::{encode_message_selector, InkHostHandler};
 
 // ---------------------------------------------------------------------------
 // Types

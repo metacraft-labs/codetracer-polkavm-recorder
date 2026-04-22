@@ -5,10 +5,10 @@
 
 use std::path::Path;
 
-use codetracer_trace_types::{Line, NONE_VALUE, TypeKind, ValueRecord};
-use codetracer_trace_writer::trace_writer::TraceWriter;
-use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
-use eyre::{Context, Result, eyre};
+use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_writer_nim::trace_writer::TraceWriter;
+use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
+use eyre::{eyre, Context, Result};
 use polkavm::{Config, Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 
 use crate::dwarf_variables::DwarfVariableInfo;
@@ -108,7 +108,7 @@ impl PolkaVmTracer {
         // the format from the file extension (.json → JSON, .bin → Binary).
         let events_filename = match format {
             TraceEventsFileFormat::Json => "trace.json",
-            TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 => "trace.bin",
+            TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 | TraceEventsFileFormat::Ctfs => "trace.bin",
         };
         let events_path = out_dir.join(events_filename);
         let metadata_path = out_dir.join("trace_metadata.json");

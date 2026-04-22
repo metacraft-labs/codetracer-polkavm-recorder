@@ -9,8 +9,8 @@
 
 use std::path::Path;
 
-use codetracer_trace_writer::TraceEventsFileFormat;
-use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
+use codetracer_trace_writer_nim::TraceEventsFileFormat;
+use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 /// Helper: create a simple PolkaVM program blob that adds two numbers.
