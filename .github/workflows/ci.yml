@@ -43,7 +43,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt -- --check
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
