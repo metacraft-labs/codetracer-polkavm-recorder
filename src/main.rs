@@ -9,8 +9,13 @@
 //! ```text
 //! codetracer-polkavm-recorder record <blob-file> \
 //!     --out-dir <output-dir> \
-//!     [--format binary|json]
+//!     [--format ctfs|binary|json]
 //! ```
+//!
+//! The default `--format` is `ctfs` — the canonical CodeTracer multi-stream
+//! container that the Nim `ct_reader_*` FFI and the db-backend's
+//! `CTFSTraceReader` consume directly.  Older trace consumers can opt into
+//! the legacy CBOR+Zstd `binary` or human-readable `json` formats.
 
 use std::path::PathBuf;
 
@@ -62,10 +67,44 @@ enum Commands {
     Version,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+/// Output format for the produced trace.
+///
+/// The default is [`OutputFormat::Ctfs`] — the canonical CodeTracer
+/// multi-stream container documented in `codetracer-trace-format-spec/`.
+/// `Binary` is the legacy CBOR+Zstd format kept for backward compatibility
+/// (single `events.bin` blob) and `Json` is a human-readable variant used
+/// during recorder-side debugging.
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
+    /// Canonical CodeTracer multi-stream container (recommended).
+    Ctfs,
+    /// Legacy CBOR + Zstd binary format.
     Binary,
+    /// Human-readable JSON (slower; useful for debugging).
     Json,
+}
+
+impl From<OutputFormat> for TraceEventsFileFormat {
+    fn from(fmt: OutputFormat) -> Self {
+        match fmt {
+            OutputFormat::Ctfs => TraceEventsFileFormat::Ctfs,
+            OutputFormat::Binary => TraceEventsFileFormat::Binary,
+            OutputFormat::Json => TraceEventsFileFormat::Json,
+        }
+    }
+}
+
+impl OutputFormat {
+    /// Stable lowercase identifier mirroring the `clap::ValueEnum`
+    /// representation; useful for diagnostic output and `trace_metadata.json`.
+    #[allow(dead_code)] // Reserved for future metadata emission paths.
+    fn as_str(self) -> &'static str {
+        match self {
+            OutputFormat::Ctfs => "ctfs",
+            OutputFormat::Binary => "binary",
+            OutputFormat::Json => "json",
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -80,7 +119,7 @@ struct RecordArgs {
     out_dir: PathBuf,
 
     /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "binary")]
+    #[arg(short = 'f', long, default_value = "ctfs")]
     format: OutputFormat,
 }
 
@@ -108,7 +147,7 @@ struct TraceInkArgs {
     out_dir: PathBuf,
 
     /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "binary")]
+    #[arg(short = 'f', long, default_value = "ctfs")]
     format: OutputFormat,
 }
 
@@ -143,7 +182,7 @@ struct ReplayArgs {
     out_dir: PathBuf,
 
     /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "binary")]
+    #[arg(short = 'f', long, default_value = "ctfs")]
     format: OutputFormat,
 }
 
@@ -178,10 +217,7 @@ fn record(args: RecordArgs) -> Result<()> {
 
     eprintln!("Blob file: {}", blob_path.display());
 
-    let format = match args.format {
-        OutputFormat::Binary => TraceEventsFileFormat::Binary,
-        OutputFormat::Json => TraceEventsFileFormat::Json,
-    };
+    let format: TraceEventsFileFormat = args.format.into();
 
     // 2. Create the output directory
     let out_dir = &args.out_dir;
@@ -232,10 +268,7 @@ fn trace_ink(args: TraceInkArgs) -> Result<()> {
             .collect::<String>()
     );
 
-    let format = match args.format {
-        OutputFormat::Binary => TraceEventsFileFormat::Binary,
-        OutputFormat::Json => TraceEventsFileFormat::Json,
-    };
+    let format: TraceEventsFileFormat = args.format.into();
 
     // Create the output directory.
     let out_dir = &args.out_dir;
@@ -283,10 +316,7 @@ fn replay(args: ReplayArgs) -> Result<()> {
         block_hash: args.block,
     };
 
-    let format = match args.format {
-        OutputFormat::Binary => TraceEventsFileFormat::Binary,
-        OutputFormat::Json => TraceEventsFileFormat::Json,
-    };
+    let format: TraceEventsFileFormat = args.format.into();
 
     replay_contract_call(&config, &args.out_dir, format)
 }
