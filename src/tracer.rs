@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
 use eyre::{eyre, Context, Result};
@@ -211,6 +211,12 @@ impl PolkaVmTracer {
                         step_count,
                         instance.program_counter()
                     );
+                    TraceWriter::register_special_event(
+                        &mut *self.writer,
+                        EventLogKind::Error,
+                        "polkavm_trap",
+                        &format!("step={step_count} pc={:?}", instance.program_counter()),
+                    );
                     TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                     break;
                 }
@@ -229,6 +235,34 @@ impl PolkaVmTracer {
                         instance.program_counter()
                     );
 
+                    // Stage the calling-convention argument registers (A0-A5)
+                    // as canonical call args before `register_call`.  The
+                    // `arg()` helper both (a) registers the value as a
+                    // step-local variable so it shows in `ct/load-locals`
+                    // and (b) appends it to the writer's pending-args buffer
+                    // so the next `register_call` attaches them to the
+                    // CallRecord.args slice (rendered in the calltrace pane).
+                    //
+                    // Pre-fix the recorder always passed `vec![]` here,
+                    // which is exactly the gap section 5.6 audit (c) calls
+                    // out: cross-contract host calls had no symbolic args.
+                    // For ecalli the calling convention is fixed (A0..A5
+                    // hold the SCALE-encoded host-function argument
+                    // pointers / lengths) so we can stage them eagerly
+                    // without per-host-function decoding.
+                    let arg_regs = [Reg::A0, Reg::A1, Reg::A2, Reg::A3, Reg::A4, Reg::A5];
+                    for (idx, reg) in arg_regs.iter().enumerate() {
+                        let value = ValueRecord::Int {
+                            i: instance.reg(*reg) as i64,
+                            type_id: reg_type_id,
+                        };
+                        let _ = TraceWriter::arg(
+                            &mut *self.writer,
+                            &format!("a{idx}"),
+                            value,
+                        );
+                    }
+
                     // Emit a Call event for the host function.
                     let fn_id = TraceWriter::ensure_function_id(
                         &mut *self.writer,
@@ -237,6 +271,73 @@ impl PolkaVmTracer {
                         Line(0),
                     );
                     TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+
+                    // Mirror observable host-side side effects onto the
+                    // structured event-log stream so the frontend's Event
+                    // Log panel surfaces them outside the calltrace.  Same
+                    // pattern as EVM 1.39 LOG-opcode routing, Cairo 1.50
+                    // StarknetEvent routing, and Fuel 1.53 Receipt
+                    // routing.  PolkaVM has no native stdout/stderr —
+                    // host functions are the only output channel — so:
+                    //
+                    //   * `seal_debug_message` (28) -> EventLogKind::Write
+                    //     (the closest analogue to a stdout print; the
+                    //     pallet-revive runtime treats it as a debug
+                    //     buffer that surfaces in node logs).
+                    //   * `seal_deposit_event` (4) -> EventLogKind::EvmEvent
+                    //     (ink! contracts emit Substrate events through
+                    //     this host fn; semantically equivalent to EVM
+                    //     LOG opcodes).
+                    //   * `seal_terminate` (9) -> EventLogKind::TraceLogEvent
+                    //     (informational; signals contract self-destruct).
+                    //
+                    // We capture only the calling-convention argument
+                    // registers in the content slot — full memory
+                    // introspection (e.g. reading the data buffer at
+                    // A0 for A1 bytes) is the next-step open work flagged
+                    // in the audit memo.  The metadata slot carries the
+                    // host-function name so the frontend can group events.
+                    match index {
+                        4 => {
+                            // seal_deposit_event(topics_ptr, topics_len,
+                            //                    data_ptr, data_len)
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::EvmEvent,
+                                "ink_deposit_event",
+                                &format!(
+                                    "topics_ptr={:#x} topics_len={} data_ptr={:#x} data_len={}",
+                                    instance.reg(Reg::A0),
+                                    instance.reg(Reg::A1),
+                                    instance.reg(Reg::A2),
+                                    instance.reg(Reg::A3),
+                                ),
+                            );
+                        }
+                        9 => {
+                            // seal_terminate(beneficiary_ptr)
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::TraceLogEvent,
+                                "ink_terminate",
+                                &format!("beneficiary_ptr={:#x}", instance.reg(Reg::A0)),
+                            );
+                        }
+                        28 => {
+                            // seal_debug_message(msg_ptr, msg_len)
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::Write,
+                                "seal_debug_message",
+                                &format!(
+                                    "msg_ptr={:#x} msg_len={}",
+                                    instance.reg(Reg::A0),
+                                    instance.reg(Reg::A1),
+                                ),
+                            );
+                        }
+                        _ => {}
+                    }
 
                     // Let the host function handler decide whether to continue.
                     let handled = self.host_handler.handle_ecalli(index, instance);
@@ -249,6 +350,12 @@ impl PolkaVmTracer {
                             "Unhandled host function {}({}) — halting execution",
                             display_name, index
                         );
+                        TraceWriter::register_special_event(
+                            &mut *self.writer,
+                            EventLogKind::Error,
+                            "unhandled_host_function",
+                            &format!("name={display_name} index={index}"),
+                        );
                         break;
                     }
                 }
@@ -258,11 +365,27 @@ impl PolkaVmTracer {
                         step_count,
                         instance.program_counter()
                     );
+                    // Route the trap onto the structured error channel so
+                    // the frontend surfaces it as a runtime failure rather
+                    // than dropping it silently (mirrors Cairo 1.50
+                    // CairoPanic and Fuel 1.53 Panic/Revert routing).
+                    TraceWriter::register_special_event(
+                        &mut *self.writer,
+                        EventLogKind::Error,
+                        "polkavm_segfault",
+                        &format!("step={step_count} pc={:?}", instance.program_counter()),
+                    );
                     TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                     break;
                 }
                 InterruptKind::NotEnoughGas => {
                     eprintln!("Out of gas at step {}", step_count);
+                    TraceWriter::register_special_event(
+                        &mut *self.writer,
+                        EventLogKind::Error,
+                        "polkavm_out_of_gas",
+                        &format!("step={step_count}"),
+                    );
                     TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                     break;
                 }
