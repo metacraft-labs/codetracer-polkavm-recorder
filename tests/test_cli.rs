@@ -148,22 +148,44 @@ fn test_record_invalid_blob() {
 // assertions
 // ===========================================================================
 
-/// Record a programmatically-built PolkaVM blob, then convert the
-/// produced `.ct` container to JSON via `ct-print --json` and assert on
-/// the textual representation.
+/// Record the canonical `flow_test.polkavm` fixture, then convert the
+/// produced `.ct` container to JSON via `ct-print` and assert on:
+///
+/// 1. **Structural anchors** (legacy layer): `ct-print --json` output
+///    contains the source filename and at least one PolkaVM register
+///    name somewhere in the textual rendering.
+/// 2. **Exact decoded values** (the layer enabled by `ct-print --full`):
+///    `flow_test.rs` runs `compute()` which evaluates
+///    `(10 + 32) * 2 + 10 = 94` via let-bindings `a=10`, `b=32`,
+///    `sum_val=42`, `doubled=84`, `final_result=94`.  The PolkaVM
+///    recorder snapshots register state on each step (no DWARF-aware
+///    let-binding recovery yet — that's a separate follow-up), so the
+///    canonical values surface through the register stream:
+///    `arg0` carries `a=10` (then `final_result=94` at the return),
+///    `arg1` carries `b=32`, `S0` carries `sum_val=42`, `S1` carries
+///    `doubled=84`.  Each value must surface in the trace as a step
+///    variable with a decoded `Int` ValueRecord whose `i` field matches
+///    the canonical literal from the source program.
 ///
 /// Pre-2026-05-08 the recorder shipped a `--format json` mode and a
 /// `trace.json` file was written directly.  The convention now mandates
 /// CTFS-only output; `ct print` is the canonical conversion tool.  See
-/// `Recorder-CLI-Conventions.md` §4.
+/// `Recorder-CLI-Conventions.md` §4.  `ct-print --full` (added 2026-05
+/// in `codetracer-trace-format-nim`) is what enables the exact-value
+/// layer — its output is a deterministic JSON document with every CBOR
+/// `ValueRecord` decoded to a structured form like
+/// `{"kind":"Int","i":42,"type_id":N}`.
 ///
-/// The PolkaVM recorder's variable payload (register values encoded as
-/// `ValueRecord::Int { i, type_id }`) does not round-trip through
-/// `ct print --json` today (same pre-existing limitation as cardano /
-/// circom / flow / fuel / leo / miden / move), so this test asserts on
-/// **structural anchors** — the fixture's source path file name and at
-/// least one of the PolkaVM register names — rather than on integer
-/// values.
+/// The note in earlier revisions of this test about register integer
+/// payloads not round-tripping through `ct-print --json` is empirically
+/// obsolete for `--full`: the recorder's `register_full_value` path
+/// decodes back to `{"kind":"Int","i":<n>,"type_id":N}` with values
+/// intact (a=10, b=32, sum_val=42, doubled=84, final_result=94 all
+/// verified).  The strict `value.kind == "Int"` invariant means: if a
+/// future PolkaVM recorder upgrade emits a different `ValueRecord`
+/// variant for register values (e.g. `Raw` for a 32-byte register
+/// snapshot), this test fails loudly and the next maintainer extends
+/// the assertion to the new variant rather than silently accepting it.
 #[test]
 fn test_recorded_trace_via_ct_print_json() {
     let ct_print = ct_print_path();
@@ -180,11 +202,22 @@ fn test_recorded_trace_via_ct_print_json() {
     let out_dir = tmp_dir.path().join("traces");
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    let blob_path = tmp_dir.path().join("simple.polkavm");
-    std::fs::write(&blob_path, build_add_program_blob()).unwrap();
+    // Use the canonical fixture so the test pins down the exact let-
+    // binding values from `flow_test.rs`.  A programmatic
+    // `build_add_program_blob` would only exercise A0/A1 and miss the
+    // S0/S1 saved-register transitions for `sum_val` and `doubled`.
+    let blob_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test-programs")
+        .join("rust")
+        .join("flow_test.polkavm");
+    assert!(
+        blob_path.exists(),
+        "canonical fixture missing at {}",
+        blob_path.display()
+    );
 
     codetracer_polkavm_recorder::recorder::record(&blob_path, &out_dir)
-        .expect("recorder should succeed on the simple add-program blob");
+        .expect("recorder should succeed on the canonical flow_test.polkavm fixture");
 
     let ct_files: Vec<_> = std::fs::read_dir(&out_dir)
         .expect("failed to read output directory")
@@ -199,7 +232,11 @@ fn test_recorded_trace_via_ct_print_json() {
     );
     let ct_path = &ct_files[0];
 
-    // ct-print --json <file.ct>
+    // -----------------------------------------------------------------
+    // Layer 1 (legacy): ct-print --json — substring presence checks.
+    // Kept as a safety net so a regression in the textual rendering
+    // is caught even if --full's JSON shape evolves.
+    // -----------------------------------------------------------------
     let output = Command::new(&ct_print)
         .args(["--json"])
         .arg(ct_path)
@@ -208,19 +245,22 @@ fn test_recorded_trace_via_ct_print_json() {
 
     assert!(
         output.status.success(),
-        "ct-print should succeed; stderr: {}",
+        "ct-print --json should succeed; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.is_empty(), "ct-print --json produced empty output");
+    let stdout_json = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout_json.is_empty(),
+        "ct-print --json produced empty output"
+    );
 
     // Structural anchor 1: the fixture source path name appears in the
     // path stream rendered by ct-print.
     assert!(
-        stdout.contains("simple.polkavm"),
+        stdout_json.contains("flow_test.polkavm"),
         "ct-print --json output should mention the fixture source path \
-         (simple.polkavm); got:\n{stdout}"
+         (flow_test.polkavm); got:\n{stdout_json}"
     );
 
     // Structural anchor 2: at least one of the PolkaVM register names
@@ -231,13 +271,186 @@ fn test_recorded_trace_via_ct_print_json() {
     // recorder at once is unlikely.
     let register_anchor = ["arg0", "arg1", "S0", "S1", "T0", "SP", "RA"]
         .iter()
-        .any(|v| stdout.contains(v));
+        .any(|v| stdout_json.contains(v));
     assert!(
         register_anchor,
         "ct-print --json output should mention at least one of the \
          PolkaVM register names \
-         (arg0/arg1/S0/S1/T0/SP/RA); got:\n{stdout}"
+         (arg0/arg1/S0/S1/T0/SP/RA); got:\n{stdout_json}"
     );
+
+    // -----------------------------------------------------------------
+    // Layer 2 (the upgrade): ct-print --full — exact decoded values.
+    // -----------------------------------------------------------------
+    let full_output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(ct_path)
+        .output()
+        .expect("failed to run ct-print --full");
+
+    assert!(
+        full_output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&full_output.stderr)
+    );
+
+    let doc: serde_json::Value = serde_json::from_slice(&full_output.stdout)
+        .expect("ct-print --full should emit valid JSON");
+
+    // ----- Path table: the canonical fixture path must appear ---------
+    let paths: Vec<&str> = doc["paths"]
+        .as_array()
+        .expect("paths array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        paths.iter().any(|p| p.ends_with("flow_test.polkavm")),
+        "expected flow_test.polkavm in paths table; got {:?}",
+        paths
+    );
+
+    // ----- Function table: empty for the PolkaVM recorder today -------
+    // The PolkaVM recorder doesn't yet resolve DWARF function names or
+    // synthesise solc-style `fn_at_pc_*` placeholders — every step is
+    // emitted at the top level with no enclosing call frame.  Pin this
+    // down explicitly so a future upgrade that adds function-table
+    // entries (or synthesises a `<toplevel>` frame) trips this
+    // assertion and the next maintainer extends the call-sequence
+    // checks below to cover the new behaviour rather than silently
+    // accepting the change.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        functions.is_empty(),
+        "expected empty functions table for the PolkaVM recorder; \
+         got {:?} — if DWARF function-name resolution has landed, \
+         extend this test to assert on the resolved names (e.g. \
+         `compute`, `main`) via `ends_with` matching",
+        functions
+    );
+
+    // ----- Step / call counts ----------------------------------------
+    // The recorder steps PolkaVM bytecode one host instruction at a
+    // time and emits register snapshots for the entry, the `compute()`
+    // dispatch, the five let-binding transitions, and the return.
+    // 7 step events / 0 call events are stable properties of the
+    // canonical fixture under the current PolkaVM recorder — if they
+    // change, that's a real regression to investigate, not a flake.
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(7),
+        "expected 7 step events for flow_test.polkavm; counts={counts}",
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(0),
+        "expected 0 call events (no call-frame synthesis yet); \
+         counts={counts}",
+    );
+    assert_eq!(
+        counts["paths"].as_u64(),
+        Some(1),
+        "expected exactly 1 path (flow_test.polkavm); counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+
+    // ----- Call sequence: empty (no call frames yet) ------------------
+    let call_sequence: Vec<&str> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .filter_map(|e| e["function"].as_str())
+        .collect();
+    assert!(
+        call_sequence.is_empty(),
+        "expected zero call_entry events for the PolkaVM recorder; \
+         got {:?} — if call-frame synthesis has landed, extend this \
+         test to verify the call sequence ends with `compute` (etc.) \
+         via `ends_with` matching",
+        call_sequence
+    );
+
+    // ----- Strict ValueRecord variant + exact decoded values ----------
+    // Collect every (varname, i64) pair surfaced by step events.  The
+    // PolkaVM recorder writes register values as `ValueRecord::Int`
+    // CBOR blobs; ct-print --full decodes them back to
+    // `{"kind":"Int","i":<n>,...}`.  If a different variant surfaces
+    // (e.g. a future `Raw` 4-byte register snapshot, or `BigInt` for
+    // 64-bit register values on Latest64), fail loudly so the test
+    // author can decide whether to extend the assertions or accept
+    // the new variant.
+    let observed_vars: Vec<(String, i64)> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| {
+            e["vars"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+        })
+        .map(|v| {
+            let name = v["varname"]
+                .as_str()
+                .expect("step var should have a varname")
+                .to_string();
+            let value = &v["value"];
+            assert_eq!(
+                value["kind"].as_str(),
+                Some("Int"),
+                "register `{}` should decode as Int, got {}; \
+                 if a new ValueRecord variant has landed for PolkaVM \
+                 register values, extend this test to assert on it \
+                 explicitly rather than weakening the check",
+                name,
+                value
+            );
+            let i = value["i"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("Int.i must be i64 for `{name}`; got {value}"));
+            (name, i)
+        })
+        .collect();
+
+    // The canonical flow from `flow_test.rs::compute()`:
+    //   a=10, b=32, sum_val=a+b=42, doubled=sum_val*2=84,
+    //   final_result=doubled+a=94.
+    // The PolkaVM recorder doesn't recover Rust let-binding names;
+    // values surface through the registers the riscv32 codegen
+    // happens to use:
+    //   arg0 (=A0)   carries `a=10` first, then `final_result=94`
+    //                at the return.
+    //   arg1 (=A1)   carries `b=32`.
+    //   S0           carries `sum_val=42`.
+    //   S1           carries `doubled=84`.
+    // Each (register, value) pair must surface at least once across
+    // the step stream — if the codegen rotates registers on a
+    // toolchain bump, regenerate `flow_test.polkavm` from
+    // `flow_test.rs` and update this list to match.  Same canonical
+    // fixture as cairo/cardano/circom/etc. — if these five values
+    // don't surface, that's the bug to chase.
+    let expected: &[(&str, i64)] = &[
+        ("arg0", 10),
+        ("arg1", 32),
+        ("S0", 42),
+        ("S1", 84),
+        ("arg0", 94),
+    ];
+    for (name, value) in expected {
+        assert!(
+            observed_vars
+                .iter()
+                .any(|(n, v)| n == name && v == value),
+            "expected step variable `{name}` = {value} in --full output; \
+             observed = {observed_vars:?}"
+        );
+    }
 }
 
 // ===========================================================================
