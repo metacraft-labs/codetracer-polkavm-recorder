@@ -3,22 +3,29 @@
 //! Added in the 1.55 audit (`AUDIT-CTFS-2026-05.md`).  Verifies the
 //! canonical-CTFS pipeline checklist items closed by the audit:
 //!
-//!   * (a) The `record` subcommand defaults to the CTFS multi-stream
+//!   * (a) The `record` subcommand writes the CTFS multi-stream
 //!     container and the resulting `.ct` file starts with the canonical
 //!     magic bytes.
-//!   * (a) The CLI advertises `ctfs` as a `--format` value with
-//!     `[default: ctfs]` (catches accidental defaults regressions).
 //!   * (d) Routing FuelVM-style structured side effects through
 //!     `register_special_event` does not regress the size or magic of
 //!     the `.ct` container; the canonical writer still produces a
 //!     materially populated trace when an ecalli host function is
 //!     invoked.
+//!
+//! History note: pre-2026-05-08 this file also contained a
+//! `ctfs_format_advertised_in_record_help` test that asserted
+//! `record --help` listed `ctfs` as a `--format` value with
+//! `[default: ctfs]`.  The 2026-05-08 convention-compliance pass
+//! removed the `--format` flag entirely (recorder is CTFS-only); the
+//! replacement assertions live in `tests/test_cli.rs`
+//! (`test_no_format_flag_in_help`, `test_help_mentions_ct_print`,
+//! `test_format_flag_rejected_by_clap`).  See `AUDIT-CTFS-2026-05.md`
+//! ("Convention compliance follow-up — 2026-05-08") for the full
+//! record.
 
 use std::path::Path;
-use std::process::Command;
 
-use codetracer_trace_writer_nim::TraceEventsFileFormat;
-use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 /// Canonical CTFS container magic bytes.  Mirrors the constant
@@ -110,12 +117,8 @@ fn ctfs_writer_produces_ct_container() {
     let blob_path = tmp.path().join("simple.polkavm");
     std::fs::write(&blob_path, build_add_program_blob()).unwrap();
 
-    codetracer_polkavm_recorder::recorder::record(
-        &blob_path,
-        &out_dir,
-        TraceEventsFileFormat::Ctfs,
-    )
-    .expect("recorder must accept TraceEventsFileFormat::Ctfs");
+    codetracer_polkavm_recorder::recorder::record(&blob_path, &out_dir)
+        .expect("recorder must produce a CTFS bundle");
 
     let bytes = read_ct_container(&out_dir);
     // A materially populated trace contains far more than just the magic
@@ -126,29 +129,6 @@ fn ctfs_writer_produces_ct_container() {
         bytes.len() > 64,
         ".ct container suspiciously small ({} bytes)",
         bytes.len()
-    );
-}
-
-/// Audit (a): `record --help` advertises `ctfs` as a `--format` value
-/// with `[default: ctfs]`.  Catches accidental regressions to the legacy
-/// `Binary` default.
-#[test]
-fn ctfs_format_advertised_in_record_help() {
-    let bin = env!("CARGO_BIN_EXE_codetracer-polkavm-recorder");
-    let output = Command::new(bin)
-        .args(["record", "--help"])
-        .output()
-        .expect("running record --help");
-    assert!(output.status.success(), "record --help should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("ctfs"),
-        "record --help should list ctfs as a --format value, got:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("[default: ctfs]"),
-        "record --help should advertise ctfs as the default format, got:\n{stdout}"
     );
 }
 
@@ -170,12 +150,8 @@ fn ecalli_special_event_does_not_empty_trace() {
     let blob_path = tmp.path().join("ecalli.polkavm");
     std::fs::write(&blob_path, build_ecalli_program_blob(28)).unwrap();
 
-    codetracer_polkavm_recorder::recorder::record(
-        &blob_path,
-        &out_dir,
-        TraceEventsFileFormat::Ctfs,
-    )
-    .expect("recorder must complete on ecalli 28");
+    codetracer_polkavm_recorder::recorder::record(&blob_path, &out_dir)
+        .expect("recorder must complete on ecalli 28");
 
     let bytes = read_ct_container(&out_dir);
     assert!(

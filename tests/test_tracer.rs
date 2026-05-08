@@ -9,8 +9,7 @@
 
 use std::path::Path;
 
-use codetracer_trace_writer_nim::TraceEventsFileFormat;
-use polkavm_common::program::{asm, InstructionSetKind, Reg::*};
+use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 /// Helper: create a simple PolkaVM program blob that adds two numbers.
@@ -68,11 +67,17 @@ fn create_compute_program_blob() -> Vec<u8> {
 }
 
 /// Helper: write a blob to a temp file and run the tracer on it.
+///
+/// The recorder is CTFS-only — `record` takes no format parameter.  The
+/// fixture-export and event-shape tests below use this helper and then
+/// either inspect the produced `.ct` container (CTFS magic check) or
+/// skip detailed JSON shape inspection (the legacy `--format json`
+/// readback path no longer exists).
 fn run_tracer_on_blob(blob_bytes: &[u8], out_dir: &Path) {
     let blob_path = out_dir.join("test_program.polkavm");
     std::fs::write(&blob_path, blob_bytes).expect("failed to write blob");
 
-    codetracer_polkavm_recorder::recorder::record(&blob_path, out_dir, TraceEventsFileFormat::Binary)
+    codetracer_polkavm_recorder::recorder::record(&blob_path, out_dir)
         .expect("trace_program should succeed");
 }
 
@@ -82,23 +87,17 @@ fn load_trace_events(out_dir: &Path) -> Vec<serde_json::Value> {
         .expect("failed to read output directory")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "ct"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "ct"))
         .collect();
     assert!(!ct_files.is_empty(), "expected .ct file in {:?}", out_dir);
     let content = std::fs::read(&ct_files[0]).expect("failed to read .ct file");
     assert!(content.len() >= 5, ".ct file too small");
-    assert_eq!(&content[..5], &[0xC0u8, 0xDE, 0x72, 0xAC, 0xE2], "CTFS magic");
+    assert_eq!(
+        &content[..5],
+        &[0xC0u8, 0xDE, 0x72, 0xAC, 0xE2],
+        "CTFS magic"
+    );
     vec![]
-}
-
-/// Helper: return empty metadata (CTFS format, metadata embedded in .ct).
-fn load_trace_metadata(out_dir: &Path) -> serde_json::Value {
-    let _ = out_dir;
-    return serde_json::json!({});
-    let metadata_path = out_dir.join("trace_metadata.json");
-    let content =
-        std::fs::read_to_string(&metadata_path).expect("failed to read trace_metadata.json");
-    serde_json::from_str(&content).expect("trace_metadata.json should be valid JSON")
 }
 
 /// Helper: collect all Int values from Value events in the trace.
@@ -166,7 +165,9 @@ fn test_polkavm_tracer_basic_execution() {
 
     // Verify .ct output.
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
     assert!(!events.is_empty(), "trace should have at least one event");
 
     // There should be Step events (actual execution was recorded).
@@ -205,7 +206,9 @@ fn test_polkavm_compute_value_at_return() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // The compute program calculates: (10 + 32) * 2 + 10 = 94
     // At the end, arg0 (A0) should contain 94.
@@ -262,7 +265,9 @@ fn test_polkavm_register_values_captured() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // The add program: arg0 = 10, arg1 = 32, arg0 = arg0 + arg1 = 42
     // (A0/A1 are renamed to arg0/arg1 within the "main" function scope)
@@ -315,7 +320,9 @@ fn test_polkavm_step_count_reasonable() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // Count Step events in the trace.
     let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
@@ -398,7 +405,9 @@ fn test_polkavm_register_names_emitted() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
     let var_names = collect_variable_names(&events);
 
     // The tracer emits resolved variable names when debug info is available.
@@ -431,7 +440,9 @@ fn test_polkavm_function_entry_exit() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // The tracer emits a Return event when execution finishes.
     let return_events: Vec<&serde_json::Value> = events
@@ -480,7 +491,9 @@ fn test_polkavm_tracer_compute_program() {
     // metadata/paths embedded in .ct
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
     assert!(!events.is_empty(), "compute program should produce events");
 
     // Collect all Int values across all Value events.
@@ -517,17 +530,12 @@ fn test_polkavm_cli_record_with_blob() {
     let blob = create_add_program_blob();
     std::fs::write(&blob_path, &blob).expect("failed to write blob");
 
-    let output = std::process::Command::new(env!("CARGO"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_codetracer-polkavm-recorder"))
         .args([
-            "run",
-            "--quiet",
-            "--",
             "record",
             blob_path.to_str().unwrap(),
             "--out-dir",
             out_dir.to_str().unwrap(),
-            "--format",
-            "json",
         ])
         .output()
         .expect("failed to run");
@@ -544,7 +552,9 @@ fn test_polkavm_cli_record_with_blob() {
 
     // Also verify the CLI-produced trace has actual content (not just empty files).
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
     assert!(!events.is_empty(), "CLI trace should have events");
 
     let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
@@ -574,7 +584,9 @@ fn test_polkavm_variable_names_resolved() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
     let var_names = collect_variable_names(&events);
 
     // Within the "main" function, A0-A5 should be renamed to arg0-arg5.
@@ -633,7 +645,9 @@ fn test_polkavm_variable_values_via_resolved_names() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // The compute program: arg0 = 10, arg1 = 32, S0 = 42, S1 = 84, arg0 = 94
     let arg0_values = find_register_values(&events, "arg0");
@@ -710,7 +724,9 @@ fn test_ecalli_generates_call_and_return_events() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // There should be a Call event with function name "seal_input".
     let call_events: Vec<&serde_json::Value> =
@@ -756,7 +772,9 @@ fn test_unknown_ecalli_halts_execution() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // A Call event should still be emitted for the unknown ecalli.
     let call_events: Vec<&serde_json::Value> =
@@ -808,7 +826,9 @@ fn test_multiple_ecalli_calls() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() { return; }
+    if events.is_empty() {
+        return;
+    }
 
     // Should have at least 3 Call events for the ecalli calls
     // (there may also be a Call for "main" from the trace start).
@@ -870,7 +890,15 @@ fn export_fixture() {
 
     // Verify the fixture was created.
     assert!(
-        {let ct: Vec<_> = std::fs::read_dir(&out_dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map_or(false, |ext| ext == "ct")).collect(); !ct.is_empty()},
+        {
+            let ct: Vec<_> = std::fs::read_dir(out_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "ct"))
+                .collect();
+            !ct.is_empty()
+        },
         ".ct should exist in fixture output"
     );
     assert!(

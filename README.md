@@ -20,22 +20,29 @@ cargo build
 Record a trace from a PolkaVM program blob:
 
 ```bash
-codetracer-polkavm-recorder record <blob-file> --out-dir <dir> [--format binary|json]
-# Produces trace files in <dir>.
-# --format selects the output format (defaults to binary).
+codetracer-polkavm-recorder record <blob-file> --out-dir <dir>
+# Produces a CTFS multi-stream `.ct` bundle plus trace_metadata.json /
+# trace_paths.json in <dir>.
 ```
 
 Trace an ink! contract via the ink! testing framework:
 
 ```bash
-codetracer-polkavm-recorder trace-ink <blob-file> --out-dir <dir> [--format binary|json]
+codetracer-polkavm-recorder trace-ink --contract <blob> --message <name> --out-dir <dir>
 ```
 
 Replay an on-chain contract execution:
 
 ```bash
-codetracer-polkavm-recorder replay <contract-address> --out-dir <dir> [--format binary|json]
+codetracer-polkavm-recorder replay --address <addr> --selector <name> --out-dir <dir>
 ```
+
+The recorder always writes traces in the canonical CodeTracer CTFS
+multi-stream format (see
+[`Recorder-CLI-Conventions.md`](https://github.com/metacraft-labs/codetracer-specs)
+§4). To convert a recorded `.ct` bundle to JSON or text for
+inspection, use `ct print` (shipped with
+[`codetracer-trace-format-nim`](https://github.com/metacraft-labs/codetracer-trace-format-nim)).
 
 However, you probably want to use it in combination with CodeTracer, which would be released soon.
 
@@ -61,6 +68,9 @@ cargo test
 
 ### Environment variables
 
+* `CODETRACER_POLKAVM_RECORDER_OUT_DIR` — fallback for `--out-dir` when the flag is omitted (convention: `Recorder-CLI-Conventions.md` §5)
+* `CODETRACER_POLKAVM_RECORDER_DISABLED` — set to `1` or `true` to skip recording entirely (the recorder still validates inputs and exits cleanly)
+* `CODETRACER_POLKAVM_RECORDER_LOG_LEVEL` — recorder log verbosity (advisory)
 * `POLKAVM_SANDBOXING_ENABLED=false` — disable PolkaVM sandboxing for CI or environments without user namespaces
 * `RUST_LOG` — controls log verbosity (standard `env_logger` syntax, e.g. `RUST_LOG=debug`)
 

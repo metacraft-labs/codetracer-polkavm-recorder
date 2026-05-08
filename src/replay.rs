@@ -13,11 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use codetracer_trace_writer_nim::TraceEventsFileFormat;
-use eyre::{eyre, Context, Result};
+use eyre::{Context, Result, eyre};
 use polkavm::ProgramBlob;
 
-use crate::ink_testing::{encode_message_selector, InkHostHandler};
+use crate::ink_testing::{InkHostHandler, encode_message_selector};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -139,11 +138,7 @@ fn fetch_or_load_contract_code(client: &SubstrateRpcClient, address: &str) -> Re
 /// 4. Build the input data (selector + calldata).
 /// 5. Run the program through the tracer with [`InkHostHandler`].
 /// 6. Write CodeTracer trace files to `out_dir`.
-pub fn replay_contract_call(
-    config: &ReplayConfig,
-    out_dir: &Path,
-    format: TraceEventsFileFormat,
-) -> Result<()> {
+pub fn replay_contract_call(config: &ReplayConfig, out_dir: &Path) -> Result<()> {
     eprintln!("Replay: contract={}", config.contract_address);
     eprintln!("Replay: message={}", config.message_selector);
     eprintln!("Replay: endpoint={}", config.endpoint);
@@ -196,7 +191,7 @@ pub fn replay_contract_call(
     std::fs::write(&blob_path, &contract_code.code)
         .with_context(|| "failed to write temporary blob file")?;
 
-    crate::recorder::record(&blob_path, out_dir, format)?;
+    crate::recorder::record(&blob_path, out_dir)?;
 
     eprintln!("Replay: trace files written to {}", out_dir.display());
 
@@ -320,7 +315,7 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().unwrap();
-        let result = replay_contract_call(&config, tmp.path(), TraceEventsFileFormat::Json);
+        let result = replay_contract_call(&config, tmp.path());
 
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
