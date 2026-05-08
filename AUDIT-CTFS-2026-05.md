@@ -405,3 +405,128 @@ unhandled-host-function; intra-program function-call boundaries +
 symbolic ink! call-arg decoding + replay-path tracing open as
 DWARF-integration / metadata-decoding / RPC-integration follow-ups).
 Audited recorder count: 11 → 12.
+
+---
+
+## Convention compliance follow-up — 2026-05-08
+
+Mirrors the cairo / cardano / circom / flow / fuel / leo / miden / move
+follow-ups: the recorder is now CTFS-only at the CLI surface, with the
+canonical `CODETRACER_<NAME>_RECORDER_OUT_DIR` /
+`CODETRACER_<NAME>_RECORDER_DISABLED` env-var contract from
+`Recorder-CLI-Conventions.md` §4 / §5.
+
+### CLI changes
+
+* `--format` / `-f` removed from all three subcommands (`record`,
+  `trace-ink`, `replay`).  Clap now rejects the flag at every level —
+  exercised by `tests/test_cli.rs::test_format_flag_rejected_by_clap`.
+* `OutputFormat` enum (and its `From<OutputFormat> for
+  TraceEventsFileFormat` / `as_str` impls) deleted from `src/main.rs`.
+* `RecordArgs.out_dir` / `TraceInkArgs.out_dir` / `ReplayArgs.out_dir`
+  changed from `PathBuf` (with `default_value = "./ct-traces/"`) to
+  `Option<PathBuf>`.  A new `resolve_out_dir` helper resolves
+  `--out-dir` → `CODETRACER_POLKAVM_RECORDER_OUT_DIR` →
+  `./ct-traces/` in priority order.
+* New `recording_disabled()` helper reads
+  `CODETRACER_POLKAVM_RECORDER_DISABLED` (`1` / `true`); each
+  subcommand short-circuits with a "skipping trace recording" note when
+  it is set.
+* `--help` text now points users at `ct print` from
+  `codetracer-trace-format-nim` for human-readable conversion.
+
+### Library / tracer changes
+
+* `src/recorder.rs::record(blob_path, out_dir)` no longer takes a
+  `format` parameter; the writer is pinned to `TraceEventsFileFormat::Ctfs`.
+* `src/tracer.rs::PolkaVmTracer::trace_program(blob_path, blob_bytes,
+  out_dir)` no longer takes a `format` parameter; same pin via the new
+  module-level `CTFS_FORMAT` constant.  The `events_filename`
+  match-on-`format` collapsed to the unconditional `trace.bin`.
+* `src/replay.rs::replay_contract_call(config, out_dir)` no longer takes
+  a `format` parameter; the route through `recorder::record` is
+  CTFS-only.  Inline `replay_contract_call` test rewritten to drop the
+  `TraceEventsFileFormat::Json` argument.
+
+### Tests
+
+* `tests/test_cli.rs` extended with the six standard convention tests:
+  - `test_recorded_trace_via_ct_print_json` — records a programmatic
+    add-program blob through `recorder::record`, pipes the produced
+    `.ct` file through `ct-print --json` from
+    `codetracer-trace-format-nim`, and asserts on **structural
+    anchors** (the fixture path `simple.polkavm` and at least one of
+    the resolved register names `arg0` / `arg1` / `S0` / `S1` / `T0` /
+    `SP` / `RA`).  Integer values are not asserted because the PolkaVM
+    recorder's variable payload (`ValueRecord::Int { i, type_id }`
+    over a `u64` register-type id) doesn't round-trip through
+    `ct print --json` today (same pre-existing limitation as cardano /
+    circom / flow / fuel / leo / miden / move).
+  - `test_env_out_dir_used_when_flag_omitted` — sets
+    `CODETRACER_POLKAVM_RECORDER_OUT_DIR=<tmp>` without `--out-dir`
+    and asserts the env-supplied dir receives the `.ct` bundle.
+  - `test_env_disabled_skips_recording` — sets
+    `CODETRACER_POLKAVM_RECORDER_DISABLED=1` and asserts the recorder
+    exits 0 with no trace artefacts written.
+  - `test_format_flag_rejected_by_clap` — asserts clap rejects
+    `--format json` at all three subcommand levels (`record` /
+    `trace-ink` / `replay`).
+  - `test_no_format_flag_in_help` — asserts `--help` (top-level + each
+    subcommand) does not advertise `--format` or `CODETRACER_FORMAT`.
+  - `test_help_mentions_ct_print` — asserts top-level `--help`
+    mentions `ct print` so users discover the canonical conversion
+    tool.
+* `tests/test_ctfs_audit.rs::ctfs_format_advertised_in_record_help`
+  **deleted**.  It asserted on the OLD `--format` contract (the flag
+  must be advertised with `[default: ctfs]`), which is incompatible
+  with the post-2026-05-08 contract (`--format` must not exist).  The
+  three replacement assertions live in `tests/test_cli.rs`
+  (`test_no_format_flag_in_help` / `test_format_flag_rejected_by_clap`
+  / `test_help_mentions_ct_print`) and the equivalent `--help`
+  greps live in `tests/verify-cli-convention-no-silent-skip.sh`.
+* `tests/test_tracer.rs::test_polkavm_cli_record_with_blob` rewritten
+  to invoke `CARGO_BIN_EXE_codetracer-polkavm-recorder` directly
+  (instead of `cargo run -- ... --format json`) so the test exercises
+  the binary that callers ship.
+
+### New artefacts
+
+* `Justfile` — standard `build` / `test` / `lint` / `verify-cli-convention`
+  / `format` recipes.  `lint` and `test` both run
+  `tests/verify-cli-convention-no-silent-skip.sh`.
+* `tests/verify-cli-convention-no-silent-skip.sh` — shell-side
+  verification that `--format` is absent from `--help` at all four
+  levels (top + record + trace-ink + replay), `--out-dir` /
+  `--version` / `ct print` are present where the convention requires
+  them, and the two env vars are referenced in `src/`.  Wired into
+  `just lint` and `just test`.
+
+### Drive-by fixes
+
+* `tests/test_tracer.rs` — pre-existing `unnecessary_map_or` warnings
+  rewritten to `is_some_and`; pre-existing `unreachable_code` /
+  unused `load_trace_metadata` helper deleted; `&out_dir` borrow
+  warning removed.  Keeps `cargo clippy --locked --all-targets -- -D
+  warnings` clean so `just lint` passes.
+* `cargo fmt` applied across the crate (the toolchain has drifted
+  since the 2026-05-02 audit commit; otherwise `just lint` would fail
+  on `cargo fmt --check`).
+
+### Verification
+
+```
+export LIBRARY_PATH=/nix/store/<…>-zstd-<…>/lib   # local libzstd workaround
+cd /home/zahary/metacraft/codetracer-polkavm-recorder
+cargo test --locked              # 47 lib + 11 cli + 2 audit + 15 tracer = 75 active passing
+cargo clippy --locked --all-targets -- -D warnings   # clean
+bash tests/verify-cli-convention-no-silent-skip.sh   # 18 ok lines, 0 fails
+```
+
+`tests/test_cli.rs::test_recorded_trace_via_ct_print_json` runs end-to-end
+(does not skip) inside the metacraft workspace where
+`../codetracer-trace-format-nim/ct-print` exists.
+
+### Recorder-CLI-Conventions.md
+
+The Implementation Status table now lists Polkavm as `✓ Compliant
+(CTFS-only)` with the standard env-var notes.

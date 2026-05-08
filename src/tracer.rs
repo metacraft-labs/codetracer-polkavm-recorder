@@ -5,11 +5,18 @@
 
 use std::path::Path;
 
-use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
-use eyre::{eyre, Context, Result};
+use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
+use eyre::{Context, Result, eyre};
 use polkavm::{Config, Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
+
+// The recorder is CTFS-only per `Recorder-CLI-Conventions.md` §4 (see
+// `codetracer-specs`).  We pin every `create_trace_writer` call site to
+// this constant so the tracer surface no longer carries a `format`
+// parameter and the writer cannot accidentally drift away from the
+// canonical multi-stream container.
+const CTFS_FORMAT: TraceEventsFileFormat = TraceEventsFileFormat::Ctfs;
 
 use crate::dwarf_variables::DwarfVariableInfo;
 use crate::host_functions::{self, HostFunctionHandler, NoOpHostFunctionHandler};
@@ -33,13 +40,9 @@ impl PolkaVmTracer {
     /// 1. Parses the program blob.
     /// 2. Creates a Module with step tracing enabled.
     /// 3. Runs the step loop, emitting trace events.
-    /// 4. Writes trace.bin, trace_metadata.json, trace_paths.json.
-    pub fn trace_program(
-        blob_path: &Path,
-        blob_bytes: &[u8],
-        out_dir: &Path,
-        format: TraceEventsFileFormat,
-    ) -> Result<()> {
+    /// 4. Writes a CTFS multi-stream `.ct` bundle plus
+    ///    `trace_metadata.json` and `trace_paths.json` to `out_dir`.
+    pub fn trace_program(blob_path: &Path, blob_bytes: &[u8], out_dir: &Path) -> Result<()> {
         // -- 1. Parse the program blob ---------------------------------------------------
         let blob = ProgramBlob::parse(blob_bytes.to_vec().into())
             .map_err(|e| eyre!("failed to parse program blob: {e}"))?;
@@ -91,10 +94,10 @@ impl PolkaVmTracer {
                 .ok_or_else(|| eyre!("no 'main' export found in program blob"))?
         };
 
-        // -- 5. Create the trace writer --------------------------------------------------
+        // -- 5. Create the trace writer (CTFS only) --------------------------------------
         let program_str = blob_path.to_string_lossy();
         let mut tracer = PolkaVmTracer {
-            writer: create_trace_writer(&program_str, &[], format),
+            writer: create_trace_writer(&program_str, &[], CTFS_FORMAT),
             reg_type_id: None,
             host_handler: Box::new(NoOpHostFunctionHandler),
             is_solidity,
@@ -104,15 +107,8 @@ impl PolkaVmTracer {
         std::fs::create_dir_all(out_dir)
             .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
-        // Use the correct filename extension so that db-backend can infer
-        // the format from the file extension (.json → JSON, .bin → Binary).
-        let events_filename = match format {
-            TraceEventsFileFormat::Json => "trace.json",
-            TraceEventsFileFormat::Binary
-            | TraceEventsFileFormat::BinaryV0
-            | TraceEventsFileFormat::Ctfs => "trace.bin",
-        };
-        let events_path = out_dir.join(events_filename);
+        // CTFS-only writer — events stream lives in `trace.bin`.
+        let events_path = out_dir.join("trace.bin");
         let metadata_path = out_dir.join("trace_metadata.json");
         let paths_path = out_dir.join("trace_paths.json");
 
@@ -256,11 +252,7 @@ impl PolkaVmTracer {
                             i: instance.reg(*reg) as i64,
                             type_id: reg_type_id,
                         };
-                        let _ = TraceWriter::arg(
-                            &mut *self.writer,
-                            &format!("a{idx}"),
-                            value,
-                        );
+                        let _ = TraceWriter::arg(&mut *self.writer, &format!("a{idx}"), value);
                     }
 
                     // Emit a Call event for the host function.

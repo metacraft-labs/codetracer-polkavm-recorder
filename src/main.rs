@@ -1,38 +1,77 @@
 //! CLI entry point for the CodeTracer PolkaVM recorder.
 //!
-//! Supports the `record` subcommand which loads a PolkaVM program blob,
-//! executes it through PolkaVM with step tracing, captures the execution
-//! trace, and writes CodeTracer trace output files.
+//! Supports the `record`, `trace-ink`, and `replay` subcommands.
 //!
 //! # Usage
 //!
 //! ```text
-//! codetracer-polkavm-recorder record <blob-file> \
-//!     --out-dir <output-dir> \
-//!     [--format ctfs|binary|json]
+//! codetracer-polkavm-recorder record <blob-file> --out-dir <output-dir>
+//! codetracer-polkavm-recorder trace-ink --contract <blob> --message <name> ...
+//! codetracer-polkavm-recorder replay --address <addr> --selector <name> ...
 //! ```
 //!
-//! The default `--format` is `ctfs` — the canonical CodeTracer multi-stream
-//! container that the Nim `ct_reader_*` FFI and the db-backend's
-//! `CTFSTraceReader` consume directly.  Older trace consumers can opt into
-//! the legacy CBOR+Zstd `binary` or human-readable `json` formats.
+//! The recorder always writes traces in the canonical CodeTracer multi-stream
+//! CTFS format (see `Recorder-CLI-Conventions.md` §4 in `codetracer-specs`).
+//! No `--format` flag is exposed: human-readable conversion is handled
+//! out-of-band by `ct print` (shipped with `codetracer-trace-format-nim`).
+//!
+//! # Environment variables
+//!
+//! * `CODETRACER_POLKAVM_RECORDER_OUT_DIR` — fallback for `--out-dir` when the
+//!   flag is not given. The CLI flag always wins.
+//! * `CODETRACER_POLKAVM_RECORDER_DISABLED` — set to `1` or `true` to skip
+//!   recording entirely. The recorder still validates its inputs (where
+//!   applicable) and propagates a clean exit code.
+//! * `CODETRACER_POLKAVM_RECORDER_LOG_LEVEL` — recorder log verbosity
+//!   (advisory; the PolkaVM recorder currently logs to stderr unconditionally).
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
-use codetracer_trace_writer_nim::TraceEventsFileFormat;
+use clap::{Parser, Subcommand};
 use eyre::{Context, Result};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Environment variable used as a fallback for `--out-dir` when the CLI
+/// flag is omitted.  Convention: see `Recorder-CLI-Conventions.md` §5.
+const ENV_OUT_DIR: &str = "CODETRACER_POLKAVM_RECORDER_OUT_DIR";
+
+/// Environment variable that, when set to `1`/`true`, disables tracing
+/// entirely — the recorder runs as a transparent pass-through.
+const ENV_DISABLED: &str = "CODETRACER_POLKAVM_RECORDER_DISABLED";
+
+/// Default output directory used when neither `--out-dir` nor
+/// `CODETRACER_POLKAVM_RECORDER_OUT_DIR` is set.
+const DEFAULT_OUT_DIR: &str = "./ct-traces/";
 
 // ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
 
 /// CodeTracer PolkaVM recorder — record PolkaVM execution traces.
+///
+/// Traces are always written in the canonical CTFS multi-stream format.
+/// To convert a recorded `.ct` bundle to JSON / text for inspection, use
+/// `ct print` from `codetracer-trace-format-nim`.
 #[derive(Debug, Parser)]
 #[command(
     name = "codetracer-polkavm-recorder",
     version,
-    about = "Record PolkaVM program execution traces for CodeTracer"
+    about = "Record PolkaVM program execution traces for CodeTracer (CTFS-only). \
+             Use `ct print` from codetracer-trace-format-nim for human-readable conversion.",
+    long_about = "Record PolkaVM program execution traces for CodeTracer.\n\
+                  \n\
+                  Output is always written in the canonical CodeTracer CTFS\n\
+                  multi-stream format. Use `ct print` (shipped with the\n\
+                  codetracer-trace-format-nim sibling) to convert a recorded\n\
+                  `.ct` bundle to JSON or other human-readable forms.\n\
+                  \n\
+                  Environment variables:\n\
+                    CODETRACER_POLKAVM_RECORDER_OUT_DIR    fallback for --out-dir\n\
+                    CODETRACER_POLKAVM_RECORDER_DISABLED   set to 1/true to skip recording\n\
+                    CODETRACER_POLKAVM_RECORDER_LOG_LEVEL  log verbosity (advisory)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -44,8 +83,8 @@ enum Commands {
     /// Record execution of a PolkaVM program.
     ///
     /// Loads the given .polkavm blob file, executes it through PolkaVM with
-    /// step tracing enabled, captures the execution trace, and writes
-    /// CodeTracer trace files to `--out-dir`.
+    /// step tracing enabled, captures the execution trace, and writes a CTFS
+    /// trace bundle to `--out-dir`.
     Record(RecordArgs),
 
     /// Trace an ink! smart contract message invocation.
@@ -67,46 +106,6 @@ enum Commands {
     Version,
 }
 
-/// Output format for the produced trace.
-///
-/// The default is [`OutputFormat::Ctfs`] — the canonical CodeTracer
-/// multi-stream container documented in `codetracer-trace-format-spec/`.
-/// `Binary` is the legacy CBOR+Zstd format kept for backward compatibility
-/// (single `events.bin` blob) and `Json` is a human-readable variant used
-/// during recorder-side debugging.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum OutputFormat {
-    /// Canonical CodeTracer multi-stream container (recommended).
-    Ctfs,
-    /// Legacy CBOR + Zstd binary format.
-    Binary,
-    /// Human-readable JSON (slower; useful for debugging).
-    Json,
-}
-
-impl From<OutputFormat> for TraceEventsFileFormat {
-    fn from(fmt: OutputFormat) -> Self {
-        match fmt {
-            OutputFormat::Ctfs => TraceEventsFileFormat::Ctfs,
-            OutputFormat::Binary => TraceEventsFileFormat::Binary,
-            OutputFormat::Json => TraceEventsFileFormat::Json,
-        }
-    }
-}
-
-impl OutputFormat {
-    /// Stable lowercase identifier mirroring the `clap::ValueEnum`
-    /// representation; useful for diagnostic output and `trace_metadata.json`.
-    #[allow(dead_code)] // Reserved for future metadata emission paths.
-    fn as_str(self) -> &'static str {
-        match self {
-            OutputFormat::Ctfs => "ctfs",
-            OutputFormat::Binary => "binary",
-            OutputFormat::Json => "json",
-        }
-    }
-}
-
 #[derive(Debug, clap::Args)]
 struct RecordArgs {
     /// Path to the PolkaVM program blob (.polkavm) file.
@@ -114,13 +113,11 @@ struct RecordArgs {
 
     /// Directory where the trace files will be written.
     ///
-    /// The directory will be created if it does not exist.
-    #[arg(short = 'o', long, default_value = "./ct-traces/")]
-    out_dir: PathBuf,
-
-    /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "ctfs")]
-    format: OutputFormat,
+    /// The directory will be created if it does not exist.  Falls back to
+    /// the `CODETRACER_POLKAVM_RECORDER_OUT_DIR` environment variable when
+    /// the flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -143,12 +140,11 @@ struct TraceInkArgs {
     constructor: Option<String>,
 
     /// Directory where the trace files will be written.
-    #[arg(short = 'o', long, default_value = "./ct-traces/")]
-    out_dir: PathBuf,
-
-    /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "ctfs")]
-    format: OutputFormat,
+    ///
+    /// Falls back to the `CODETRACER_POLKAVM_RECORDER_OUT_DIR` environment
+    /// variable when the flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -178,12 +174,44 @@ struct ReplayArgs {
     source_dir: Option<PathBuf>,
 
     /// Directory where the trace files will be written.
-    #[arg(short = 'o', long, default_value = "./ct-traces/")]
-    out_dir: PathBuf,
+    ///
+    /// Falls back to the `CODETRACER_POLKAVM_RECORDER_OUT_DIR` environment
+    /// variable when the flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
+}
 
-    /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "ctfs")]
-    format: OutputFormat,
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective output directory:
+///   1. `--out-dir` if given on the CLI.
+///   2. `CODETRACER_POLKAVM_RECORDER_OUT_DIR` env var.
+///   3. `DEFAULT_OUT_DIR` ("./ct-traces/").
+fn resolve_out_dir(cli_out_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = cli_out_dir {
+        return path;
+    }
+    if let Some(value) = std::env::var_os(ENV_OUT_DIR)
+        && !value.is_empty()
+    {
+        return PathBuf::from(value);
+    }
+    PathBuf::from(DEFAULT_OUT_DIR)
+}
+
+/// Whether the recorder is disabled via env var.  When true, the CLI
+/// must execute its target operation in pass-through mode without
+/// emitting any trace artefacts.
+fn recording_disabled() -> bool {
+    match std::env::var(ENV_DISABLED) {
+        Ok(value) => {
+            let v = value.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        }
+        Err(_) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,15 +245,21 @@ fn record(args: RecordArgs) -> Result<()> {
 
     eprintln!("Blob file: {}", blob_path.display());
 
-    let format: TraceEventsFileFormat = args.format.into();
+    if recording_disabled() {
+        // Pass-through: the PolkaVM recorder doesn't run a separate target
+        // process — it loads & executes the blob itself — so disabling
+        // recording simply means "don't emit any trace artefacts".
+        eprintln!("{ENV_DISABLED} is set; skipping trace recording (no output written).");
+        return Ok(());
+    }
 
-    // 2. Create the output directory
-    let out_dir = &args.out_dir;
-    std::fs::create_dir_all(out_dir)
+    // 2. Resolve and create the output directory
+    let out_dir = resolve_out_dir(args.out_dir);
+    std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
-    // 3. Run the recorder
-    codetracer_polkavm_recorder::recorder::record(&blob_path, out_dir, format)?;
+    // 3. Run the recorder (CTFS only)
+    codetracer_polkavm_recorder::recorder::record(&blob_path, &out_dir)?;
 
     eprintln!("Trace files written to {}", out_dir.display());
 
@@ -238,7 +272,7 @@ fn record(args: RecordArgs) -> Result<()> {
 
 /// Execute the `trace-ink` subcommand.
 fn trace_ink(args: TraceInkArgs) -> Result<()> {
-    use codetracer_polkavm_recorder::ink_testing::{encode_message_selector, InkTestConfig};
+    use codetracer_polkavm_recorder::ink_testing::{InkTestConfig, encode_message_selector};
 
     let contract_path = args
         .contract
@@ -268,17 +302,20 @@ fn trace_ink(args: TraceInkArgs) -> Result<()> {
             .collect::<String>()
     );
 
-    let format: TraceEventsFileFormat = args.format.into();
+    if recording_disabled() {
+        eprintln!("{ENV_DISABLED} is set; skipping trace recording (no output written).");
+        return Ok(());
+    }
 
-    // Create the output directory.
-    let out_dir = &args.out_dir;
-    std::fs::create_dir_all(out_dir)
+    // Resolve and create the output directory.
+    let out_dir = resolve_out_dir(args.out_dir);
+    std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
     // For now, run the standard recorder. Full ink!-aware tracing with
     // InkHostHandler will be wired in when the drink!/cargo-contract
     // integration is complete.
-    codetracer_polkavm_recorder::recorder::record(&contract_path, out_dir, format)?;
+    codetracer_polkavm_recorder::recorder::record(&contract_path, &out_dir)?;
 
     eprintln!("Trace files written to {}", out_dir.display());
 
@@ -291,7 +328,7 @@ fn trace_ink(args: TraceInkArgs) -> Result<()> {
 
 /// Execute the `replay` subcommand.
 fn replay(args: ReplayArgs) -> Result<()> {
-    use codetracer_polkavm_recorder::replay::{replay_contract_call, ReplayConfig};
+    use codetracer_polkavm_recorder::replay::{ReplayConfig, replay_contract_call};
 
     // Parse hex calldata if provided.
     let calldata = if args.calldata.is_empty() {
@@ -316,7 +353,14 @@ fn replay(args: ReplayArgs) -> Result<()> {
         block_hash: args.block,
     };
 
-    let format: TraceEventsFileFormat = args.format.into();
+    if recording_disabled() {
+        eprintln!("{ENV_DISABLED} is set; skipping replay recording (no output written).");
+        return Ok(());
+    }
 
-    replay_contract_call(&config, &args.out_dir, format)
+    let out_dir = resolve_out_dir(args.out_dir);
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
+
+    replay_contract_call(&config, &out_dir)
 }
