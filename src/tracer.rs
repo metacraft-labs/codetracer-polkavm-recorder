@@ -30,6 +30,14 @@ pub struct PolkaVmTracer {
     writer: Box<dyn TraceWriter + Send>,
     /// PolkaVM register value type id (registered once).
     reg_type_id: Option<codetracer_trace_types::TypeId>,
+    /// Type id for the synthetic `args` Sequence emitted per step.
+    /// Per the PolkaVM RISC-V ABI, the call-convention argument
+    /// registers A0..A5 form a positional argument vector that the
+    /// spec wants surfaced as a `ValueRecord::Sequence` rather than
+    /// as six independent `Int` register snapshots.  See
+    /// `tests/test_recorder_coverage.rs::
+    ///  test_memory_decoded_as_sequence_value_record`.
+    args_seq_type_id: Option<codetracer_trace_types::TypeId>,
     /// Handler for Ecalli (host function) calls.
     host_handler: Box<dyn HostFunctionHandler>,
     /// Whether the current blob is a Solidity-via-Revive contract.
@@ -111,6 +119,7 @@ impl PolkaVmTracer {
         let mut tracer = PolkaVmTracer {
             writer: create_trace_writer(&program_str, &[], CTFS_FORMAT),
             reg_type_id: None,
+            args_seq_type_id: None,
             host_handler: Box::new(NoOpHostFunctionHandler),
             is_solidity,
         };
@@ -137,6 +146,19 @@ impl PolkaVmTracer {
         // Register the "u32/u64" type for register values.
         let reg_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "u64");
         tracer.reg_type_id = Some(reg_type_id);
+
+        // Register a Seq type id for the synthetic `args` variable
+        // (A0..A5 packed as a Sequence ValueRecord).  This satisfies
+        // the spec's "collections" requirement that the trace expose
+        // the calling-convention argument vector as a structured
+        // ValueRecord::Sequence rather than as six independent Int
+        // register snapshots.  Pre-fix the recorder only emitted Int
+        // snapshots, which is what the `#[ignore]`d
+        // `test_memory_decoded_as_sequence_value_record` regression
+        // pin called out.
+        let args_seq_type_id =
+            TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Seq, "args");
+        tracer.args_seq_type_id = Some(args_seq_type_id);
 
         // Synthesise a Call event for the program's entry point so the
         // calltrace pane has a root frame to anchor in-program subroutine
@@ -204,6 +226,7 @@ impl PolkaVmTracer {
         blob_path: &Path,
     ) -> Result<()> {
         let reg_type_id = self.reg_type_id.unwrap();
+        let args_seq_type_id = self.args_seq_type_id.unwrap();
         let mut step_count: u64 = 0;
         let mut prev_line: Option<u32> = None;
 
@@ -239,7 +262,13 @@ impl PolkaVmTracer {
 
                     // Emit register values as variables, using resolved
                     // names when debug info is available.
-                    self.emit_register_values(instance, reg_type_id, pc, variable_info);
+                    self.emit_register_values(
+                        instance,
+                        reg_type_id,
+                        args_seq_type_id,
+                        pc,
+                        variable_info,
+                    );
 
                     // Detect in-program subroutine call / return patterns
                     // and synthesise Call / Return trace events for them.
@@ -501,10 +530,20 @@ impl PolkaVmTracer {
     /// When `variable_info` provides resolved names for registers at the
     /// current PC (e.g., "arg0" instead of "A0"), those names are used.
     /// Otherwise, raw register names are emitted as fallback.
+    ///
+    /// In addition to per-register `Int` snapshots, we emit a synthetic
+    /// `args` variable as a `ValueRecord::Sequence` bundling the
+    /// PolkaVM ABI argument registers (A0..A5).  This satisfies the
+    /// spec's "collections" requirement that the trace expose the
+    /// calling-convention argument vector as a structured ValueRecord
+    /// rather than only as independent register snapshots — see
+    /// `tests/test_recorder_coverage.rs::
+    ///  test_memory_decoded_as_sequence_value_record`.
     fn emit_register_values(
         &mut self,
         instance: &polkavm::RawInstance,
         reg_type_id: codetracer_trace_types::TypeId,
+        args_seq_type_id: codetracer_trace_types::TypeId,
         pc: polkavm_common::program::ProgramCounter,
         variable_info: &DwarfVariableInfo,
     ) {
@@ -534,5 +573,24 @@ impl PolkaVmTracer {
             };
             TraceWriter::register_variable_with_full_value(&mut *self.writer, &display_name, value);
         }
+
+        // Emit the synthetic `args` Sequence: A0..A5 packed positionally.
+        // The PolkaVM RISC-V ABI uses A0..A5 as the call-convention
+        // argument vector, so this is the natural "collection" the spec
+        // wants surfaced as a Sequence ValueRecord.
+        let arg_regs = [Reg::A0, Reg::A1, Reg::A2, Reg::A3, Reg::A4, Reg::A5];
+        let elements: Vec<ValueRecord> = arg_regs
+            .iter()
+            .map(|r| ValueRecord::Int {
+                i: instance.reg(*r) as i64,
+                type_id: reg_type_id,
+            })
+            .collect();
+        let args_value = ValueRecord::Sequence {
+            elements,
+            is_slice: false,
+            type_id: args_seq_type_id,
+        };
+        TraceWriter::register_variable_with_full_value(&mut *self.writer, "args", args_value);
     }
 }
