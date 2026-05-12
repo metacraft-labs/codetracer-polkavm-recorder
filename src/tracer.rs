@@ -3,6 +3,7 @@
 //! Steps through a PolkaVM program using step tracing and emits
 //! CodeTracer trace events (steps, calls, returns, variables).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueRecord};
@@ -10,6 +11,7 @@ use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
 use polkavm::{Config, Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
+use polkavm_common::program::Instruction;
 
 // The recorder is CTFS-only per `Recorder-CLI-Conventions.md` §4 (see
 // `codetracer-specs`).  We pin every `create_trace_writer` call site to
@@ -64,6 +66,16 @@ impl PolkaVmTracer {
 
         let source_mapper = SourceMapper::from_blob(&blob);
         let variable_info = DwarfVariableInfo::from_blob(&blob);
+
+        // Pre-build a `pc -> Instruction` lookup so the step loop can detect
+        // in-program subroutine call/return patterns (`load_imm_and_jump` /
+        // `jump_indirect`) without re-parsing the bytecode on every step.
+        // PolkaVM doesn't expose `Module::blob()` publicly, so we capture the
+        // instructions while we still own the parsed `ProgramBlob` here.
+        let instruction_at_pc: HashMap<u32, Instruction> = blob
+            .instructions()
+            .map(|parsed| (parsed.offset.0, parsed.kind))
+            .collect();
 
         // -- 3. Create engine and module with step tracing -------------------------------
         let engine_config = Config::from_env()
@@ -126,6 +138,37 @@ impl PolkaVmTracer {
         let reg_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "u64");
         tracer.reg_type_id = Some(reg_type_id);
 
+        // Synthesise a Call event for the program's entry point so the
+        // calltrace pane has a root frame to anchor in-program subroutine
+        // call/return events against (and so the function table lists
+        // `main` / `call` / `deploy` rather than only the ecalli targets).
+        // Pre-fix the recorder never registered the entry function, which
+        // (a) left the function table empty for non-ecalli programs, and
+        // (b) meant the very first in-program `register_call` had no
+        // outer frame to nest under.
+        let entry_name: String = module
+            .exports()
+            .find(|e| e.program_counter() == entry_point)
+            .and_then(|e| {
+                core::str::from_utf8(e.symbol().as_bytes())
+                    .ok()
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| {
+                if is_solidity {
+                    "call".to_string()
+                } else {
+                    "main".to_string()
+                }
+            });
+        let entry_fn_id = TraceWriter::ensure_function_id(
+            &mut *tracer.writer,
+            &entry_name,
+            blob_path,
+            Line(1),
+        );
+        TraceWriter::register_call(&mut *tracer.writer, entry_fn_id, vec![]);
+
         // -- 8. Instantiate and run with step tracing ------------------------------------
         let mut instance = module
             .instantiate()
@@ -133,7 +176,13 @@ impl PolkaVmTracer {
 
         instance.prepare_call_typed(entry_point, ());
 
-        tracer.run_step_loop(&mut instance, &source_mapper, &variable_info, blob_path)?;
+        tracer.run_step_loop(
+            &mut instance,
+            &source_mapper,
+            &variable_info,
+            &instruction_at_pc,
+            blob_path,
+        )?;
 
         // -- 9. Finish writing -----------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
@@ -151,6 +200,7 @@ impl PolkaVmTracer {
         instance: &mut polkavm::RawInstance,
         source_mapper: &SourceMapper,
         variable_info: &DwarfVariableInfo,
+        instruction_at_pc: &HashMap<u32, Instruction>,
         blob_path: &Path,
     ) -> Result<()> {
         let reg_type_id = self.reg_type_id.unwrap();
@@ -190,6 +240,65 @@ impl PolkaVmTracer {
                     // Emit register values as variables, using resolved
                     // names when debug info is available.
                     self.emit_register_values(instance, reg_type_id, pc, variable_info);
+
+                    // Detect in-program subroutine call / return patterns
+                    // and synthesise Call / Return trace events for them.
+                    //
+                    // PolkaVM has no native "call" or "ret" opcode — by
+                    // convention RISC-V-style ABIs use:
+                    //
+                    //   * `load_imm_and_jump(RA, ret_pc, callee_pc)` to
+                    //     "set RA = ret_pc; jump to callee_pc" — i.e. a
+                    //     function call that lets the callee return via
+                    //     `jump_indirect(RA, 0)`.
+                    //   * `jump_indirect(RA, 0)` (also spelt `ret`) to
+                    //     return to whatever address sits in RA.
+                    //
+                    // Step tracing fires *before* the instruction at PC
+                    // executes, so we emit the Call before the jump
+                    // happens (next Step lands at the callee) and the
+                    // Return before the ret-jump happens (next Step
+                    // lands at the return PC, or `Finished` if RA pointed
+                    // outside the program).
+                    //
+                    // Pre-fix the recorder ignored these patterns entirely:
+                    // `counts.calls` was 0 for every blob that didn't go
+                    // through `ecalli`, even when the bytecode contained
+                    // a deep in-program subroutine chain.  See
+                    // `tests/test_recorder_coverage.rs::
+                    //  test_in_program_nested_subroutines_emit_call_events`
+                    // for the regression pin.
+                    if let Some(instruction) = instruction_at_pc.get(&pc.0) {
+                        match *instruction {
+                            Instruction::load_imm_and_jump(_ra, _value, target) => {
+                                let callee_name = format!("fn_at_pc_{target}");
+                                let callee_fn_id = TraceWriter::ensure_function_id(
+                                    &mut *self.writer,
+                                    &callee_name,
+                                    blob_path,
+                                    Line(0),
+                                );
+                                TraceWriter::register_call(
+                                    &mut *self.writer,
+                                    callee_fn_id,
+                                    vec![],
+                                );
+                            }
+                            Instruction::jump_indirect(base, _offset) => {
+                                // Treat `jump_indirect(RA, _)` as a return.
+                                // Other indirect jumps (computed-goto /
+                                // jump-table dispatch) are not call/return
+                                // boundaries and are left as plain steps.
+                                if base.get() == Reg::RA {
+                                    TraceWriter::register_return(
+                                        &mut *self.writer,
+                                        NONE_VALUE,
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 InterruptKind::Finished => {
                     // Emit the final return.
