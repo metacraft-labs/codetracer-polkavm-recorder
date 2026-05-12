@@ -267,25 +267,31 @@ fn test_branching_via_ct_print_full() {
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
 
-    // Functions table is empty: the PolkaVM recorder doesn't synthesize
-    // a `<toplevel>` frame yet (matches the canonical fixture in
-    // tests/test_cli.rs::test_recorded_trace_via_ct_print_json).
+    // Functions table: the recorder registers the program entry point
+    // (`main` for non-Solidity blobs) as a Call so the calltrace pane
+    // has a root frame for in-program subroutine calls to nest under.
+    // No other functions are expected for pure-bytecode control flow.
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert!(
-        functions.is_empty(),
-        "expected empty functions table for the PolkaVM recorder; got {:?}",
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "expected only the synthesised entry-point function for the \
+         PolkaVM recorder; got {:?}",
         functions
     );
 
-    // No call_entry / call_exit events for in-program control flow.
-    assert!(
-        observed_call_sequence(&doc).is_empty(),
-        "no call_entry events expected for pure-bytecode control flow"
+    // Exactly one `call_entry`: the synthesised entry-point Call for
+    // `main`.  No additional `call_entry` events for pure-bytecode
+    // control flow (no `load_imm_and_jump` instructions in this blob).
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "only the entry-point Call(main) is expected for pure-bytecode control flow"
     );
 
     // Counts: the recorder emits one step per source-line transition.
@@ -298,7 +304,11 @@ fn test_branching_via_ct_print_full() {
     // double-checks this from the value side.
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(5), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(0), "calls; counts={counts}");
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "exactly one call expected: the synthesised entry-point Call(main); counts={counts}"
+    );
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -394,7 +404,13 @@ fn test_loop_via_ct_print_full() {
         "expected loop step count <= 30 for a 4-iteration loop; got {steps} \
          — if a recorder regression is unrolling steps, this would explode"
     );
-    assert_eq!(calls, 0, "no in-program call_entry events expected; counts={counts}");
+    // Exactly one Call: the synthesised entry-point Call(main).  The
+    // loop body uses unconditional `jump` and `branch_*`, neither of
+    // which the recorder treats as a function-call boundary.
+    assert_eq!(
+        calls, 1,
+        "only the entry-point Call(main) is expected; loop branches are not call boundaries; counts={counts}"
+    );
 
     // The loop counter (A0 = arg0 inside `main`) must reach 4 at the
     // exit of the loop, and must visit every intermediate value 0..=4
@@ -418,10 +434,12 @@ fn test_loop_via_ct_print_full() {
          the recorder appears to be running the loop one iteration too many"
     );
 
-    // No call_entry events for in-program control flow.
-    assert!(
-        observed_call_sequence(&doc).is_empty(),
-        "no call_entry events expected for pure-bytecode loop"
+    // Only the synthesised entry-point Call(main); the loop body uses
+    // `jump` and `branch_*`, neither of which is a call boundary.
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "only the entry-point Call(main) is expected for a pure-bytecode loop"
     );
 }
 
@@ -494,27 +512,29 @@ fn test_nested_calls_via_ct_print_full() {
     }
 
     // Call sequence: exact expected order (top-down through the
-    // bytecode).  The recorder emits one `call_entry` per ecalli; if
-    // it emits more, that's a duplicate-event bug; if it emits fewer,
-    // it's silently dropping host-function records.
+    // bytecode).  The recorder emits one `call_entry` per ecalli plus
+    // a leading synthesised `main` Call for the program entry point;
+    // if it emits more, that's a duplicate-event bug; if it emits
+    // fewer, it's silently dropping host-function records.
     let call_sequence = observed_call_sequence(&doc);
     assert_eq!(
         call_sequence,
         vec![
+            "main".to_string(),
             "seal_get_storage".to_string(),
             "seal_set_storage".to_string(),
             "seal_debug_message".to_string(),
             "seal_caller".to_string(),
         ],
-        "call_entry events must appear in the exact ecalli order"
+        "call_entry events must appear in entry-point + ecalli order"
     );
 
-    // Exactly 4 call_entry + 4 call_exit events.
+    // Exactly 5 call_entry events: 1 entry-point `main` + 4 ecalli targets.
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(4),
-        "expected exactly 4 call events (one per ecalli); counts={counts}"
+        Some(5),
+        "expected exactly 5 call events (entry-point `main` + 4 ecalli); counts={counts}"
     );
 
     // The recorder routes seal_debug_message through
@@ -541,13 +561,6 @@ fn test_nested_calls_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: in-program subroutine calls (load_imm_and_jump \
-            to a callee + jump_indirect(RA, 0) to return) are stepped \
-            through but no Call/Return trace events are emitted.  Spec- \
-            compliant output for a 3+ deep call chain should surface \
-            three `call_entry` and three `call_exit` events with the \
-            correct LIFO ordering, regardless of whether the calls go \
-            through ecalli or in-program subroutines."]
 fn test_in_program_nested_subroutines_emit_call_events() {
     // BB0: setup; load_imm_and_jump(RA=ret_pc, callee_BB)
     // BB1 (callee): some work; jump_indirect(RA, 0)
@@ -631,9 +644,13 @@ fn test_memory_collection_via_ct_print_full() {
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
 
-    // No host calls.
+    // No host calls — only the synthesised entry-point Call(main).
     let counts = &doc["counts"];
-    assert_eq!(counts["calls"].as_u64(), Some(0), "calls; counts={counts}");
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -744,7 +761,14 @@ fn test_trap_via_ct_print_full() {
         Some(1),
         "expected exactly 1 io_event (the polkavm_trap error); counts={counts}"
     );
-    assert_eq!(counts["calls"].as_u64(), Some(0), "calls; counts={counts}");
+    // Exactly one Call: the synthesised entry-point Call(main).  The
+    // trap aborts execution before any in-program subroutine call is
+    // reached.
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; calls={counts}"
+    );
 
     // Find the trap io event and assert its shape.  ct-print --full
     // surfaces special events as `{kind: "io", io_kind: "elkError", ...}`
@@ -863,10 +887,12 @@ fn test_host_calls_via_ct_print_full() {
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
 
-    // Exact call sequence: every ecalli, in source order, resolved to
-    // its pallet-revive name (see src/host_functions.rs).
+    // Exact call sequence: the synthesised entry-point Call(main) for
+    // the program's `main` export, then every ecalli in source order
+    // resolved to its pallet-revive name (see src/host_functions.rs).
     let call_sequence = observed_call_sequence(&doc);
     let expected_calls = vec![
+        "main".to_string(),
         "seal_input".to_string(),
         "seal_caller".to_string(),
         "seal_value_transferred".to_string(),
@@ -877,14 +903,14 @@ fn test_host_calls_via_ct_print_full() {
     ];
     assert_eq!(
         call_sequence, expected_calls,
-        "host-call sequence must match the source-order ecalli list"
+        "host-call sequence must be entry-point + source-order ecalli list"
     );
 
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(7),
-        "expected exactly 7 call events; counts={counts}"
+        Some(8),
+        "expected exactly 8 call events (1 entry-point + 7 ecalli); counts={counts}"
     );
 
     // Special-event routing per the recorder's tracer.rs match arm:

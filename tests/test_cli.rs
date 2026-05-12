@@ -310,12 +310,14 @@ fn test_recorded_trace_via_ct_print_json() {
         paths
     );
 
-    // ----- Function table: empty for the PolkaVM recorder today -------
+    // ----- Function table: only the synthesised entry-point ----------
     // The PolkaVM recorder doesn't yet resolve DWARF function names or
-    // synthesise solc-style `fn_at_pc_*` placeholders — every step is
-    // emitted at the top level with no enclosing call frame.  Pin this
-    // down explicitly so a future upgrade that adds function-table
-    // entries (or synthesises a `<toplevel>` frame) trips this
+    // synthesise solc-style `fn_at_pc_*` placeholders for in-program
+    // subroutine calls in this fixture (flow_test.polkavm uses no
+    // `load_imm_and_jump` calls).  It does, however, register the
+    // program entry point (`main` for non-Solidity blobs) so the
+    // calltrace pane has a root frame.  Pin this down so a future
+    // upgrade that adds DWARF function-name resolution trips this
     // assertion and the next maintainer extends the call-sequence
     // checks below to cover the new behaviour rather than silently
     // accepting the change.
@@ -325,12 +327,13 @@ fn test_recorded_trace_via_ct_print_json() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert!(
-        functions.is_empty(),
-        "expected empty functions table for the PolkaVM recorder; \
-         got {:?} — if DWARF function-name resolution has landed, \
-         extend this test to assert on the resolved names (e.g. \
-         `compute`, `main`) via `ends_with` matching",
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "expected only the synthesised entry-point function for the \
+         PolkaVM recorder; got {:?} — if DWARF function-name resolution \
+         has landed, extend this test to assert on the resolved names \
+         (e.g. `compute`, `main`) via `ends_with` matching",
         functions
     );
 
@@ -349,9 +352,9 @@ fn test_recorded_trace_via_ct_print_json() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(0),
-        "expected 0 call events (no call-frame synthesis yet); \
-         counts={counts}",
+        Some(1),
+        "expected exactly 1 call event (the synthesised entry-point \
+         Call(main)); counts={counts}",
     );
     assert_eq!(
         counts["paths"].as_u64(),
@@ -361,18 +364,19 @@ fn test_recorded_trace_via_ct_print_json() {
 
     let events = doc["events"].as_array().expect("events array");
 
-    // ----- Call sequence: empty (no call frames yet) ------------------
+    // ----- Call sequence: only the synthesised entry-point Call(main)
     let call_sequence: Vec<&str> = events
         .iter()
         .filter(|e| e["kind"] == "call_entry")
         .filter_map(|e| e["function"].as_str())
         .collect();
-    assert!(
-        call_sequence.is_empty(),
-        "expected zero call_entry events for the PolkaVM recorder; \
-         got {:?} — if call-frame synthesis has landed, extend this \
-         test to verify the call sequence ends with `compute` (etc.) \
-         via `ends_with` matching",
+    assert_eq!(
+        call_sequence,
+        vec!["main"],
+        "expected only the synthesised entry-point Call(main) for the \
+         PolkaVM recorder; got {:?} — if DWARF-driven call-frame \
+         synthesis has landed, extend this test to verify the call \
+         sequence ends with `compute` (etc.) via `ends_with` matching",
         call_sequence
     );
 
