@@ -384,27 +384,52 @@ fn test_recorded_trace_via_ct_print_json() {
     // Collect every (varname, i64) pair surfaced by step events.  The
     // PolkaVM recorder writes register values as `ValueRecord::Int`
     // CBOR blobs; ct-print --full decodes them back to
-    // `{"kind":"Int","i":<n>,...}`.  If a different variant surfaces
-    // (e.g. a future `Raw` 4-byte register snapshot, or `BigInt` for
-    // 64-bit register values on Latest64), fail loudly so the test
-    // author can decide whether to extend the assertions or accept
-    // the new variant.
-    let observed_vars: Vec<(String, i64)> = events
-        .iter()
-        .filter(|e| e["kind"] == "step")
-        .flat_map(|e| {
-            e["vars"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-        })
-        .map(|v| {
+    // `{"kind":"Int","i":<n>,...}`.  Each step also carries one
+    // synthetic `args` variable encoded as a `ValueRecord::Sequence`
+    // bundling the PolkaVM ABI argument registers (A0..A5) — that
+    // variant is strictly asserted in-line and excluded from the Int
+    // collection used for the canonical-flow value check below.
+    // If any OTHER non-Int variant surfaces (e.g. a future `Raw`
+    // 4-byte register snapshot, or `BigInt` for 64-bit register
+    // values on Latest64), fail loudly so the test author can decide
+    // whether to extend the assertions or accept the new variant.
+    let mut observed_vars: Vec<(String, i64)> = Vec::new();
+    for ev in events.iter().filter(|e| e["kind"] == "step") {
+        let vars = ev["vars"].as_array().cloned().unwrap_or_default();
+        for v in vars {
             let name = v["varname"]
                 .as_str()
                 .expect("step var should have a varname")
                 .to_string();
             let value = &v["value"];
+            if name == "args" {
+                // Strictly assert the synthetic `args` variable shape
+                // (Sequence of 6 Int elements, one per A0..A5).
+                assert_eq!(
+                    value["kind"].as_str(),
+                    Some("Sequence"),
+                    "synthetic `args` variable must decode as Sequence; got {value}"
+                );
+                let elements = value["elements"]
+                    .as_array()
+                    .expect("Sequence.elements array");
+                assert_eq!(
+                    elements.len(),
+                    6,
+                    "synthetic `args` Sequence must hold A0..A5 (6 elements); got {elements:?}"
+                );
+                for (idx, el) in elements.iter().enumerate() {
+                    assert_eq!(
+                        el["kind"].as_str(),
+                        Some("Int"),
+                        "args[{idx}] must be an Int element; got {el}"
+                    );
+                    el["i"]
+                        .as_i64()
+                        .unwrap_or_else(|| panic!("args[{idx}].i must be i64; got {el}"));
+                }
+                continue;
+            }
             assert_eq!(
                 value["kind"].as_str(),
                 Some("Int"),
@@ -418,9 +443,9 @@ fn test_recorded_trace_via_ct_print_json() {
             let i = value["i"]
                 .as_i64()
                 .unwrap_or_else(|| panic!("Int.i must be i64 for `{name}`; got {value}"));
-            (name, i)
-        })
-        .collect();
+            observed_vars.push((name, i));
+        }
+    }
 
     // The canonical flow from `flow_test.rs::compute()`:
     //   a=10, b=32, sum_val=a+b=42, doubled=sum_val*2=84,
