@@ -10,8 +10,42 @@ use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueReco
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
-use polkavm::{Config, Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
+use polkavm::{Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::program::Instruction;
+
+/// Name of the environment variable that opts the recorder into gas
+/// metering with a caller-supplied budget.  When set to a positive
+/// integer, the recorder enables synchronous gas metering on the module
+/// and primes the instance gas counter to the supplied value, so a
+/// program that exceeds the budget surfaces an `InterruptKind::NotEnoughGas`
+/// interrupt.  The `not_enough_gas_test` fixture pins this on; pre-fix
+/// the recorder never enabled gas metering, so the NotEnoughGas arm of
+/// `run_step_loop` was dead code.
+const GAS_LIMIT_ENV: &str = "POLKAVM_RECORDER_GAS_LIMIT";
+
+thread_local! {
+    /// Per-thread override of the gas budget used by `trace_program`.
+    /// When `Some(n)`, the recorder enables synchronous gas metering
+    /// with budget `n` regardless of the `POLKAVM_RECORDER_GAS_LIMIT`
+    /// env var.  Tests use this to drive the NotEnoughGas termination
+    /// arm without affecting sibling tests running in parallel on
+    /// other threads.  See `set_thread_local_gas_limit`.
+    static THREAD_GAS_LIMIT: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Override the gas limit for recordings on the current thread.
+///
+/// Pass `Some(n)` to opt into synchronous gas metering with budget
+/// `n`; pass `None` to clear the override (falling back to the
+/// `POLKAVM_RECORDER_GAS_LIMIT` env var if set).
+///
+/// This is exposed for test-side use: cargo runs tests on multiple
+/// threads in parallel within a single test binary, so a process-wide
+/// env var would leak state into sibling tests.  Setting the budget
+/// via a thread-local keeps the configuration isolated.
+pub fn set_thread_local_gas_limit(limit: Option<i64>) {
+    THREAD_GAS_LIMIT.with(|cell| cell.set(limit));
+}
 
 // The recorder is CTFS-only per `Recorder-CLI-Conventions.md` §4 (see
 // `codetracer-specs`).  We pin every `create_trace_writer` call site to
@@ -93,6 +127,21 @@ impl PolkaVmTracer {
 
         let mut module_config = ModuleConfig::new();
         module_config.set_step_tracing(true);
+
+        // Optional opt-in gas metering: a thread-local override
+        // (set by tests via `set_thread_local_gas_limit`) takes
+        // precedence over the `POLKAVM_RECORDER_GAS_LIMIT` env var.
+        // When either is set, run with synchronous gas metering
+        // primed to the given budget so out-of-gas programs surface
+        // the `NotEnoughGas` termination arm of `run_step_loop`.
+        // Pre-fix the arm was dead code because the recorder always
+        // ran without metering.
+        let gas_limit: Option<i64> = THREAD_GAS_LIMIT
+            .with(|cell| cell.get())
+            .or_else(|| std::env::var(GAS_LIMIT_ENV).ok().and_then(|s| s.parse().ok()));
+        if gas_limit.is_some() {
+            module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+        }
 
         let module = Module::from_blob(&engine, &module_config, blob)
             .map_err(|e| eyre!("failed to compile module: {e}"))?;
@@ -197,6 +246,11 @@ impl PolkaVmTracer {
             .map_err(|e| eyre!("failed to instantiate module: {e}"))?;
 
         instance.prepare_call_typed(entry_point, ());
+
+        // Prime the gas budget if the caller asked for metering.
+        if let Some(gas) = gas_limit {
+            instance.set_gas(gas);
+        }
 
         tracer.run_step_loop(
             &mut instance,
@@ -325,6 +379,110 @@ impl PolkaVmTracer {
                                     );
                                 }
                             }
+
+                            // Divide-by-zero detection.
+                            //
+                            // PolkaVM follows RISC-V semantics for div/rem:
+                            // division by zero does NOT trap — it returns
+                            // u32::MAX (unsigned) or -1 (signed); modulo
+                            // by zero returns the dividend.  See
+                            // `polkavm-common/src/operation.rs::divu/div/
+                            //  remu/rem`.
+                            //
+                            // To surface the distinct error taxonomy
+                            // requested by M12 the recorder inspects the
+                            // divisor register *before* the instruction
+                            // executes and emits a `polkavm_divide_by_zero`
+                            // EventLogKind::Error special event when it is
+                            // zero.  Execution continues with the RISC-V
+                            // sentinel result so the rest of the trace
+                            // remains intact; the event surfaces in
+                            // ct-print --full as a single ioError entry.
+                            Instruction::div_unsigned_32(_d, _s1, s2)
+                            | Instruction::div_unsigned_64(_d, _s1, s2)
+                            | Instruction::div_signed_32(_d, _s1, s2)
+                            | Instruction::div_signed_64(_d, _s1, s2)
+                            | Instruction::rem_unsigned_32(_d, _s1, s2)
+                            | Instruction::rem_unsigned_64(_d, _s1, s2)
+                            | Instruction::rem_signed_32(_d, _s1, s2)
+                            | Instruction::rem_signed_64(_d, _s1, s2) => {
+                                let divisor_reg = s2.get();
+                                if instance.reg(divisor_reg) == 0 {
+                                    TraceWriter::register_special_event(
+                                        &mut *self.writer,
+                                        EventLogKind::Error,
+                                        "polkavm_divide_by_zero",
+                                        &format!(
+                                            "step={step_count} pc={:?} divisor_reg={:?}",
+                                            instance.program_counter(),
+                                            divisor_reg,
+                                        ),
+                                    );
+                                }
+                            }
+
+                            // Misaligned-access detection.
+                            //
+                            // PolkaVM permits unaligned memory access (it
+                            // does NOT enforce alignment), but the spec
+                            // wants the trace to surface the distinct
+                            // taxonomy when a load/store happens at an
+                            // address that is not a multiple of the
+                            // element size.  The recorder reads the base
+                            // register / immediate offset, computes the
+                            // effective address, and emits a
+                            // `polkavm_misaligned_access` EventLogKind::Error
+                            // special event when the alignment is wrong.
+                            // Execution continues — PolkaVM handles the
+                            // unaligned access transparently.
+                            Instruction::load_u16(_d, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_u16", None, imm, 2);
+                            }
+                            Instruction::load_i16(_d, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_i16", None, imm, 2);
+                            }
+                            Instruction::load_u32(_d, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_u32", None, imm, 4);
+                            }
+                            Instruction::load_i32(_d, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_i32", None, imm, 4);
+                            }
+                            Instruction::load_u64(_d, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_u64", None, imm, 8);
+                            }
+                            Instruction::store_u16(_s, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "store_u16", None, imm, 2);
+                            }
+                            Instruction::store_u32(_s, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "store_u32", None, imm, 4);
+                            }
+                            Instruction::store_u64(_s, imm) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "store_u64", None, imm, 8);
+                            }
+                            Instruction::load_indirect_u16(_d, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_u16", Some(base.get()), offset, 2);
+                            }
+                            Instruction::load_indirect_i16(_d, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_i16", Some(base.get()), offset, 2);
+                            }
+                            Instruction::load_indirect_u32(_d, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_u32", Some(base.get()), offset, 4);
+                            }
+                            Instruction::load_indirect_i32(_d, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_i32", Some(base.get()), offset, 4);
+                            }
+                            Instruction::load_indirect_u64(_d, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_u64", Some(base.get()), offset, 8);
+                            }
+                            Instruction::store_indirect_u16(_s, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "store_indirect_u16", Some(base.get()), offset, 2);
+                            }
+                            Instruction::store_indirect_u32(_s, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "store_indirect_u32", Some(base.get()), offset, 4);
+                            }
+                            Instruction::store_indirect_u64(_s, base, offset) => {
+                                detect_misalign(&mut *self.writer, instance, step_count, "store_indirect_u64", Some(base.get()), offset, 8);
+                            }
                             _ => {}
                         }
                     }
@@ -437,6 +595,46 @@ impl PolkaVmTracer {
                                 "ink_deposit_event",
                                 &format!(
                                     "topics_ptr={:#x} topics_len={} data_ptr={:#x} data_len={}",
+                                    instance.reg(Reg::A0),
+                                    instance.reg(Reg::A1),
+                                    instance.reg(Reg::A2),
+                                    instance.reg(Reg::A3),
+                                ),
+                            );
+                        }
+                        5 => {
+                            // seal_get_storage(key_ptr, key_len,
+                            //                  out_ptr, out_len_ptr)
+                            //
+                            // Surface the pallet-revive storage read on the
+                            // structured trace-log stream so the frontend
+                            // can show contract-storage operations
+                            // distinctly from generic host calls and
+                            // EVM events.  The argument-register snapshot
+                            // travels through the per-step `args` Sequence
+                            // (see `emit_register_values`).
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::TraceLogEvent,
+                                "seal_get_storage",
+                                &format!(
+                                    "key_ptr={:#x} key_len={} out_ptr={:#x} out_len_ptr={:#x}",
+                                    instance.reg(Reg::A0),
+                                    instance.reg(Reg::A1),
+                                    instance.reg(Reg::A2),
+                                    instance.reg(Reg::A3),
+                                ),
+                            );
+                        }
+                        6 => {
+                            // seal_set_storage(key_ptr, key_len,
+                            //                  value_ptr, value_len)
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::TraceLogEvent,
+                                "seal_set_storage",
+                                &format!(
+                                    "key_ptr={:#x} key_len={} value_ptr={:#x} value_len={}",
                                     instance.reg(Reg::A0),
                                     instance.reg(Reg::A1),
                                     instance.reg(Reg::A2),
@@ -592,5 +790,41 @@ impl PolkaVmTracer {
             type_id: args_seq_type_id,
         };
         TraceWriter::register_variable_with_full_value(&mut *self.writer, "args", args_value);
+    }
+}
+
+/// Detect a misaligned PolkaVM load/store and emit a
+/// `polkavm_misaligned_access` EventLogKind::Error special event if so.
+///
+/// PolkaVM does not enforce alignment — unaligned accesses succeed and
+/// are handled in software — but the M12 fixtures want this distinct
+/// taxonomy surfaced as an `ioError` entry in the trace so downstream
+/// tooling can tell it apart from a plain panic / trap.
+///
+/// `base_reg` carries the address-base register for the `*_indirect_*`
+/// family; for the direct `load_uN` / `store_uN` family it is `None` and
+/// the effective address is simply the immediate operand (PolkaVM
+/// encodes those as absolute addresses).
+fn detect_misalign(
+    writer: &mut dyn TraceWriter,
+    instance: &polkavm::RawInstance,
+    step_count: u64,
+    op_name: &str,
+    base_reg: Option<Reg>,
+    imm_offset: u32,
+    access_size: u32,
+) {
+    let base_val = base_reg.map(|r| instance.reg(r)).unwrap_or(0);
+    let effective_addr = base_val.wrapping_add(imm_offset as u64);
+    #[allow(clippy::manual_is_multiple_of)]
+    if access_size > 1 && effective_addr % access_size as u64 != 0 {
+        TraceWriter::register_special_event(
+            writer,
+            EventLogKind::Error,
+            "polkavm_misaligned_access",
+            &format!(
+                "step={step_count} op={op_name} addr={effective_addr:#x} size={access_size}"
+            ),
+        );
     }
 }

@@ -604,13 +604,16 @@ fn test_nested_calls_via_ct_print_full() {
         "expected exactly 5 call events (entry-point `main` + 4 ecalli); counts={counts}"
     );
 
-    // The recorder routes seal_debug_message through
-    // EventLogKind::Write — it must surface as one io_event.
+    // The recorder routes three of the four ecallis here onto special
+    // events: seal_get_storage(5) and seal_set_storage(6) both onto
+    // EventLogKind::TraceLogEvent (pallet-revive storage operations),
+    // and seal_debug_message(28) onto EventLogKind::Write.  seal_caller(2)
+    // has no side-effect routing and therefore contributes no io_event.
     assert_eq!(
         counts["io_events"].as_u64(),
-        Some(1),
-        "expected exactly 1 io_event (seal_debug_message routes onto \
-         EventLogKind::Write); counts={counts}"
+        Some(3),
+        "expected exactly 3 io_events (seal_get_storage + seal_set_storage \
+         + seal_debug_message); counts={counts}"
     );
 
     // A0 (= arg0 inside main) must carry the four pre-ecalli sentinel
@@ -1019,31 +1022,33 @@ fn test_host_calls_via_ct_print_full() {
 
     // Special-event routing per the recorder's tracer.rs match arm:
     //   * seal_deposit_event(4)  -> EventLogKind::EvmEvent
+    //   * seal_set_storage(6)    -> EventLogKind::TraceLogEvent
     //   * seal_debug_message(28) -> EventLogKind::Write
-    // Two routed io_events expected; if the recorder drops one, this
-    // count fails.  If it routes a third (e.g. a regression starts
-    // routing seal_set_storage too), this also fails.
+    // Three routed io_events expected; if the recorder drops one,
+    // this count fails.
     assert_eq!(
         counts["io_events"].as_u64(),
-        Some(2),
-        "expected exactly 2 routed io_events (seal_deposit_event + \
-         seal_debug_message); counts={counts}"
+        Some(3),
+        "expected exactly 3 routed io_events (seal_deposit_event + \
+         seal_set_storage + seal_debug_message); counts={counts}"
     );
 
     // Inspect the io stream in source order: first the EvmEvent
-    // (deposit_event), then the Write (debug_message).  ct-print
-    // --full surfaces special events as `{kind: "io", io_kind: ...}`
-    // — per codetracer_ct_print_lib.nim §3 of the events loop.
+    // (deposit_event), then the TraceLogEvent (set_storage), then the
+    // Write (debug_message).  ct-print --full surfaces special events
+    // as `{kind: "io", io_kind: ...}` — per codetracer_ct_print_lib.nim
+    // §3 of the events loop.
     let events = doc["events"].as_array().expect("events array");
     let io_events: Vec<&serde_json::Value> = events
         .iter()
         .filter(|e| e["kind"] == "io")
         .collect();
-    assert_eq!(io_events.len(), 2, "expected exactly 2 io event entries");
+    assert_eq!(io_events.len(), 3, "expected exactly 3 io event entries");
     // The multi-stream writer collapses the 14-variant EventLogKind
     // into the 4-variant IOEventKind palette (see toIOEventKind in
     // codetracer_trace_writer_ffi.nim):
     //   * EventLogKind::EvmEvent      -> ioStderr (deposit_event)
+    //   * EventLogKind::TraceLogEvent -> ioStderr (set_storage)
     //   * EventLogKind::Write         -> ioStdout (debug_message)
     // RECORDER BUG (cross-recorder): the EvmEvent / TraceLogEvent
     // distinction is lost in the multi-stream collapse — both surface
@@ -1059,26 +1064,39 @@ fn test_host_calls_via_ct_print_full() {
     );
     assert_eq!(
         io_events[1]["io_kind"].as_str(),
-        Some("ioStdout"),
-        "second io event should carry io_kind=ioStdout (Write \
+        Some("ioStderr"),
+        "second io event should carry io_kind=ioStderr (TraceLogEvent \
          collapsed by toIOEventKind); got {}",
         io_events[1]
     );
+    assert_eq!(
+        io_events[2]["io_kind"].as_str(),
+        Some("ioStdout"),
+        "third io event should carry io_kind=ioStdout (Write \
+         collapsed by toIOEventKind); got {}",
+        io_events[2]
+    );
     // Spot-check the textual content: the recorder formats the
-    // metadata string with topic/data pointers for deposit_event and
-    // msg_ptr/msg_len for debug_message.  In multi-stream the content
-    // string survives but the metadata name (e.g. "ink_deposit_event")
-    // does not — per trace_writer_register_special_event multi-stream
-    // path, only `content` is stored as IOEvent data bytes.
+    // metadata string with topic/data pointers for deposit_event,
+    // key/value pointer/length for set_storage, and msg_ptr/msg_len
+    // for debug_message.  In multi-stream the content string survives
+    // but the metadata name (e.g. "ink_deposit_event") does not — per
+    // trace_writer_register_special_event multi-stream path, only
+    // `content` is stored as IOEvent data bytes.
     let first_text = io_events[0]["text"].as_str().unwrap_or("");
     let second_text = io_events[1]["text"].as_str().unwrap_or("");
+    let third_text = io_events[2]["text"].as_str().unwrap_or("");
     assert!(
         first_text.contains("topics_ptr=") || first_text.contains("topics_len="),
         "first io event content should mention topics_ptr/topics_len; got {first_text:?}"
     );
     assert!(
-        second_text.contains("msg_ptr=") || second_text.contains("msg_len="),
-        "second io event content should mention msg_ptr/msg_len; got {second_text:?}"
+        second_text.contains("key_ptr=") || second_text.contains("value_ptr="),
+        "second io event content should mention key_ptr/value_ptr; got {second_text:?}"
+    );
+    assert!(
+        third_text.contains("msg_ptr=") || third_text.contains("msg_len="),
+        "third io event content should mention msg_ptr/msg_len; got {third_text:?}"
     );
 
     // The four function names that share an `seal_*` prefix must all
@@ -1096,4 +1114,728 @@ fn test_host_calls_via_ct_print_full() {
             functions
         );
     }
+}
+
+// ===========================================================================
+// branch_family_test — exhaustive coverage of all 12 conditional branches
+// ===========================================================================
+//
+// PolkaVM exposes 12 conditional-branch instructions:
+//
+//   reg/reg/offset:  branch_eq, branch_not_eq,
+//                    branch_less_unsigned, branch_less_signed,
+//                    branch_greater_or_equal_unsigned,
+//                    branch_greater_or_equal_signed
+//
+//   reg/imm/offset:  branch_eq_imm, branch_not_eq_imm,
+//                    branch_less_unsigned_imm, branch_less_signed_imm,
+//                    branch_greater_or_equal_unsigned_imm,
+//                    branch_greater_or_equal_signed_imm
+//
+// Before M12 only `branch_greater_or_equal_unsigned` and
+// `branch_greater_or_equal_unsigned_imm` were exercised (by the loop
+// and branching fixtures respectively).  The remaining 10 were
+// completely uncovered, leaving a large control-flow surface that the
+// recorder could silently regress on.
+//
+// The fixture wires up 13 basic blocks: BB0..BB11 each end with a
+// distinct conditional branch (set up to be NOT taken so control
+// falls through all 12), and BB12 holds the program-exit ret.  The
+// register state (A0=10, A1=20) is chosen so every branch condition
+// resolves to false; the recorder must step through each of the 12
+// branch instructions in source order without taking any.
+fn branch_family_program() -> Vec<Instruction> {
+    vec![
+        // BB0: setup + branch_eq
+        asm::load_imm(A0, 10),
+        asm::load_imm(A1, 20),
+        asm::branch_eq(A0, A1, 12), // 10 == 20: false → fall through
+        // BB1: branch_not_eq
+        asm::branch_not_eq(A0, A0, 12), // 10 != 10: false
+        // BB2: branch_less_unsigned
+        asm::branch_less_unsigned(A1, A0, 12), // 20 < 10: false
+        // BB3: branch_less_signed
+        asm::branch_less_signed(A1, A0, 12), // 20 < 10: false
+        // BB4: branch_greater_or_equal_unsigned
+        asm::branch_greater_or_equal_unsigned(A0, A1, 12), // 10 >= 20: false
+        // BB5: branch_greater_or_equal_signed
+        asm::branch_greater_or_equal_signed(A0, A1, 12), // 10 >= 20: false
+        // BB6: branch_eq_imm
+        asm::branch_eq_imm(A0, 99, 12), // 10 == 99: false
+        // BB7: branch_not_eq_imm
+        asm::branch_not_eq_imm(A0, 10, 12), // 10 != 10: false
+        // BB8: branch_less_unsigned_imm
+        asm::branch_less_unsigned_imm(A0, 5, 12), // 10 < 5: false
+        // BB9: branch_less_signed_imm
+        asm::branch_less_signed_imm(A0, 5, 12), // 10 < 5: false
+        // BB10: branch_greater_or_equal_unsigned_imm
+        asm::branch_greater_or_equal_unsigned_imm(A0, 11, 12), // 10 >= 11: false
+        // BB11: branch_greater_or_equal_signed_imm
+        asm::branch_greater_or_equal_signed_imm(A0, 11, 12), // 10 >= 11: false
+        // BB12: program exit
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_branch_family_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_branch_family_via_ct_print_full",
+        "branch_family_test",
+        &branch_family_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // The functions table must contain only the synthesised
+    // entry-point Call(main): the program contains no in-program
+    // subroutine call (no `load_imm_and_jump`) and no `ecalli`.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "branch_family must register only the entry-point `main`; got {:?}",
+        functions
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "branch_family must emit only the entry-point Call(main); a conditional \
+         branch is not a function-call boundary"
+    );
+
+    // Exactly 15 PolkaVM instructions execute in source order: 2
+    // load_imm + 12 branches + 1 ret.  Each runtime instruction emits
+    // one step (the PolkaVM source mapper assigns a distinct line to
+    // every offset).  The recorder also emits one synthetic entry
+    // step from its initial `prev_line = None -> Some(line)` transition
+    // before running the loop body, giving 16 step events total —
+    // matching the established branching/loop fixture convention
+    // (4 runtime instructions → 5 steps for branching_test).
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(16),
+        "expected exactly 16 step events (initial entry + 2 load_imm + \
+         12 branches + 1 ret); counts={counts}"
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the synthesised entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "branch_family must not emit any io_events; counts={counts}"
+    );
+
+    // A1 (= arg1 inside main) must surface as 20; the test relies on
+    // A1 holding 20 throughout to keep every reg/reg branch condition
+    // resolved as false.  If a recorder regression dropped the
+    // load_imm A1 step, neither 20 nor any of the comparison
+    // semantics would be observable.
+    let a0 = values_for(&doc, "arg0");
+    let a1 = values_for(&doc, "arg1");
+    assert!(
+        a0.contains(&10),
+        "arg0 (A0) should snapshot 10 across the branch family; got {:?}",
+        a0
+    );
+    assert!(
+        a1.contains(&20),
+        "arg1 (A1) should snapshot 20 across the branch family; got {:?}",
+        a1
+    );
+
+    // Strict per-step Sequence shape: every executed PolkaVM
+    // instruction step must carry the synthetic args Sequence.
+    // (The recorder's phantom "initial entry" step — the first step
+    // event emitted before any instruction runs — does NOT carry
+    // register vars, so the Sequence count is `steps - 1`.)  Once
+    // the setup load_imms run, the Sequence must be exactly
+    // [10, 20, 0, 0, 0, 0] for the duration of the branch sequence
+    // (A2..A5 are never written, so they stay at their entry value
+    // of 0).
+    let args_seqs = observed_args_sequence_vars(&doc);
+    let total_steps = counts["steps"].as_u64().unwrap_or(0);
+    assert_eq!(
+        args_seqs.len() as u64,
+        total_steps - 1,
+        "every executed-instruction step must carry an `args` Sequence \
+         (the phantom initial entry step has no register vars); \
+         got {} seqs for {} steps",
+        args_seqs.len(),
+        total_steps
+    );
+    // The first 2 sequences land on the setup load_imms (load_imm
+    // is per-step pre-instruction snapshot, so A0/A1 are NOT yet
+    // written at those steps).  Every subsequent step must show
+    // [10, 20, 0, 0, 0, 0].
+    for seq in &args_seqs[2..] {
+        assert_eq!(
+            seq,
+            &[10, 20, 0, 0, 0, 0],
+            "post-setup args Sequence must be [10, 20, 0, 0, 0, 0]; got {seq:?}"
+        );
+    }
+}
+
+// ===========================================================================
+// not_enough_gas_test — `NotEnoughGas` termination arm
+// ===========================================================================
+//
+// The recorder's `run_step_loop` carries a `NotEnoughGas` arm that
+// emits a `polkavm_out_of_gas` EventLogKind::Error special event and a
+// closing Return.  PolkaVM only surfaces this interrupt when the
+// module is built with `set_gas_metering(Some(...))`.  Pre-M12 the
+// recorder never enabled gas metering, so the arm was dead code.
+//
+// The fixture opts into gas metering by setting the
+// `POLKAVM_RECORDER_GAS_LIMIT` environment variable to a very small
+// budget (5 units) and runs a small infinite loop that exhausts the
+// budget within a handful of instructions.  The trace must surface
+// the out-of-gas Error special event and close cleanly.
+//
+// Cargo runs tests on multiple threads within a single test binary,
+// so a process-wide `POLKAVM_RECORDER_GAS_LIMIT` env var would leak
+// gas metering into sibling tests running in parallel.  The recorder
+// exposes a thread-local override (`set_thread_local_gas_limit`) that
+// keeps the configuration scoped to the current test thread; we use
+// it via a guard that clears the override on every exit path.
+fn out_of_gas_program() -> Vec<Instruction> {
+    vec![
+        // Tiny tight loop: increment A0 each iteration, jump back.
+        // With gas budget = 5, the recorder will run ~5 instructions
+        // before the NotEnoughGas interrupt fires.
+        asm::add_imm_32(A0, A0, 1),
+        asm::jump(0),
+    ]
+}
+
+struct GasLimitGuard;
+
+impl GasLimitGuard {
+    fn set(limit: i64) -> Self {
+        codetracer_polkavm_recorder::tracer::set_thread_local_gas_limit(Some(limit));
+        Self
+    }
+}
+
+impl Drop for GasLimitGuard {
+    fn drop(&mut self) {
+        codetracer_polkavm_recorder::tracer::set_thread_local_gas_limit(None);
+    }
+}
+
+#[test]
+fn test_not_enough_gas_via_ct_print_full() {
+    let _guard = GasLimitGuard::set(5);
+
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_not_enough_gas_via_ct_print_full",
+        "not_enough_gas_test",
+        &out_of_gas_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // Only the synthesised entry-point Call(main): the out-of-gas
+    // termination is not a call boundary.
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "expected exactly 1 io_event (the polkavm_out_of_gas error); counts={counts}"
+    );
+
+    // The out-of-gas error must surface as a single io event of kind
+    // Error → collapsed to ioError by toIOEventKind.
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "io")
+        .collect();
+    assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
+    assert_eq!(
+        io_events[0]["io_kind"].as_str(),
+        Some("ioError"),
+        "out-of-gas io event should carry io_kind=ioError; got {}",
+        io_events[0]
+    );
+    let text = io_events[0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.starts_with("step="),
+        "out-of-gas io event content should start with `step=`; got {text:?}"
+    );
+
+    // A0 must surface as a non-zero loop counter — the tight loop ran
+    // at least one increment before exhausting the budget.
+    let a0 = values_for(&doc, "arg0");
+    let max_a0 = a0.iter().copied().max().unwrap_or(0);
+    assert!(
+        max_a0 >= 1,
+        "tight loop must increment arg0 at least once before out-of-gas; \
+         got max arg0 = {max_a0}, seen = {:?}",
+        a0
+    );
+}
+
+// ===========================================================================
+// divide_by_zero_test — distinct ioError taxonomy beyond plain trap
+// ===========================================================================
+//
+// PolkaVM follows RISC-V semantics for div/rem-by-zero: the
+// instruction does NOT trap.  Instead `divu` returns `u32::MAX` and
+// `div` returns `-1`; `remu` / `rem` return the dividend.  See
+// `polkavm-common/src/operation.rs`.
+//
+// To surface this distinct error taxonomy the recorder inspects the
+// divisor register before each `div_*` / `rem_*` instruction and
+// emits a `polkavm_divide_by_zero` EventLogKind::Error special event
+// when it is zero.  Execution continues with the RISC-V sentinel
+// result so the rest of the trace remains intact.
+//
+// The fixture loads A0=10, A1=0, performs `div_unsigned_32 A2 = A0 / A1`,
+// then returns.  The trace must surface exactly one io event of
+// kind ioError with the divide-by-zero metadata.
+fn divide_by_zero_program() -> Vec<Instruction> {
+    vec![
+        asm::load_imm(A0, 10),
+        asm::load_imm(A1, 0),
+        asm::div_unsigned_32(A2, A0, A1),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_divide_by_zero_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_divide_by_zero_via_ct_print_full",
+        "divide_by_zero_test",
+        &divide_by_zero_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "expected exactly 1 io_event (polkavm_divide_by_zero); counts={counts}"
+    );
+    // Steps: 4 instructions execute (load A0, load A1, div, ret),
+    // each on a distinct line.  The recorder emits 5 step events
+    // (initial entry + 4 line transitions) — same convention as the
+    // branching/branch-family fixtures.
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(5),
+        "expected exactly 5 step events (initial entry + 4 instr lines); counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "io")
+        .collect();
+    assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
+    assert_eq!(
+        io_events[0]["io_kind"].as_str(),
+        Some("ioError"),
+        "divide_by_zero io event should carry io_kind=ioError; got {}",
+        io_events[0]
+    );
+    let text = io_events[0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("divisor_reg=") && text.starts_with("step="),
+        "divide_by_zero io event content should mention divisor_reg= and \
+         start with step=; got {text:?}"
+    );
+
+    // The dividend value 10 must surface in A0, and divisor 0 in A1
+    // (the latter is the very register snapshot that the recorder
+    // reads to decide whether to emit the divide-by-zero event).
+    let a0 = values_for(&doc, "arg0");
+    let a1 = values_for(&doc, "arg1");
+    let a2 = values_for(&doc, "arg2");
+    assert!(a0.contains(&10), "arg0 should snapshot 10; got {a0:?}");
+    assert!(a1.contains(&0), "arg1 should snapshot 0 (the zero divisor); got {a1:?}");
+    // After the div executes, A2 holds the RISC-V sentinel
+    // `u32::MAX` for divu-by-zero.  ct-print surfaces the register
+    // as a signed i64; `u32::MAX as i64` = 4294967295.
+    assert!(
+        a2.contains(&(u32::MAX as i64)),
+        "arg2 (quotient) should hold u32::MAX (RISC-V divu-by-zero sentinel); got {a2:?}"
+    );
+}
+
+// ===========================================================================
+// misaligned_access_test — distinct ioError taxonomy for misaligned loads
+// ===========================================================================
+//
+// PolkaVM does NOT enforce alignment — unaligned memory accesses
+// succeed and are handled in software — but the M12 fixtures want
+// this distinct taxonomy surfaced as an `ioError` entry so downstream
+// tooling can tell it apart from a plain panic / trap.
+//
+// The recorder inspects each load/store instruction at step time,
+// computes the effective address, and emits a
+// `polkavm_misaligned_access` EventLogKind::Error special event when
+// the address is not a multiple of the access size.  Execution
+// continues; PolkaVM handles the unaligned access transparently.
+//
+// The fixture issues a `store_u32` at address 1 (1 is not 4-byte
+// aligned) targeting the program's RW segment.  Exactly one io event
+// of kind ioError must surface.
+fn misaligned_access_program() -> Vec<Instruction> {
+    // SP starts at the top of the (page-aligned) stack region.  We
+    // want a write that (a) lands inside the mapped stack page so
+    // PolkaVM does NOT segfault, and (b) is misaligned to 4 bytes.
+    //
+    // `store_indirect_u32(A0, SP, offset)` writes 4 bytes starting
+    // at SP + offset.  With offset = -7 the effective address is
+    // SP - 7 through SP - 4 (inclusive), which all sit inside the
+    // last 8 bytes of the mapped stack page.  Because SP itself is
+    // page-aligned, (SP - 7) mod 4 = 1 → the access is misaligned
+    // to 4 bytes.  The store actually executes (PolkaVM allows
+    // unaligned access) but the recorder emits the misalign event
+    // before letting the instruction run.
+    vec![
+        asm::load_imm(A0, 0x42),
+        asm::store_indirect_u32(A0, SP, (-7i32) as u32),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_misaligned_access_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_misaligned_access_via_ct_print_full",
+        "misaligned_access_test",
+        &misaligned_access_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "expected exactly 1 io_event (polkavm_misaligned_access); counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "io")
+        .collect();
+    assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
+    assert_eq!(
+        io_events[0]["io_kind"].as_str(),
+        Some("ioError"),
+        "misaligned_access io event should carry io_kind=ioError; got {}",
+        io_events[0]
+    );
+    let text = io_events[0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("op=store_indirect_u32") && text.contains("size=4"),
+        "misaligned_access io event content should identify the op and access \
+         size; got {text:?}"
+    );
+}
+
+// ===========================================================================
+// stack_frame_test — SP prologue / epilogue
+// ===========================================================================
+//
+// Every compiled-from-Rust PolkaVM program manipulates the stack
+// pointer via a `sub_imm SP, SP, N` prologue and a matching
+// `add_imm SP, SP, N` epilogue.  Before M12 no inline fixture
+// exercised this pattern, so the recorder's SP register snapshot
+// behaviour was effectively unverified for compiled-Rust traces.
+//
+// The fixture builds a minimal "framed" function:
+//
+//   prologue: sub_imm SP, SP, 16           ; allocate a 16-byte frame
+//   body:     store_indirect_u32 A0, SP, 0  ; spill A0
+//             load_imm A0, 42              ; do some "work"
+//             load_indirect_u32 A1, SP, 0  ; reload spilled value into A1
+//   epilogue: add_imm SP, SP, 16            ; deallocate the frame
+//             ret
+//
+// The recorder must snapshot SP both BEFORE and AFTER the prologue
+// (and respectively after the epilogue), and the trace must show SP
+// taking exactly two distinct values: SP_high (initial) and
+// SP_high - 16 (during the framed body).
+fn stack_frame_program() -> Vec<Instruction> {
+    vec![
+        // Seed A0 with a sentinel value so the spill/reload chain
+        // produces an observable register state.
+        asm::load_imm(A0, 0x1234),
+        // Prologue: allocate 16-byte frame.
+        // add_imm_32 SP, SP, -16 in two's complement.
+        asm::add_imm_32(SP, SP, (-16i32) as u32),
+        // Body: spill A0 to [SP+0], do work, reload into A1.
+        // (The Latest32 ISA exposes the signed-32 indirect load
+        // `load_indirect_i32`, not the unsigned variant — the value
+        // round-trips identically for our positive sentinel.)
+        asm::store_indirect_u32(A0, SP, 0),
+        asm::load_imm(A0, 0xCAFE),
+        asm::load_indirect_i32(A1, SP, 0),
+        // Epilogue: deallocate frame and return.
+        asm::add_imm_32(SP, SP, 16),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_stack_frame_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_stack_frame_via_ct_print_full",
+        "stack_frame_test",
+        &stack_frame_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // Only the entry-point Call(main): no in-program subroutine
+    // call, no ecalli, no trap.
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "stack frame manipulation must not emit io_events; counts={counts}"
+    );
+    // 7 instructions execute, each on its own line; the recorder
+    // emits 8 step events (initial entry + 7 line transitions).
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(8),
+        "expected exactly 8 step events (initial entry + 7 instr lines); counts={counts}"
+    );
+
+    // SP must take exactly two distinct values across the trace: the
+    // initial stack-top value (call it SP_high) and SP_high - 16
+    // during the framed body.
+    let sp_values = values_for(&doc, "SP");
+    let unique_sps: std::collections::BTreeSet<i64> =
+        sp_values.iter().copied().collect();
+    assert_eq!(
+        unique_sps.len(),
+        2,
+        "SP should take exactly 2 distinct values across the framed call; \
+         got {unique_sps:?}"
+    );
+    let sp_high = *unique_sps.iter().max().unwrap();
+    let sp_low = *unique_sps.iter().min().unwrap();
+    assert_eq!(
+        sp_high - sp_low,
+        16,
+        "SP_high - SP_low should be exactly 16 (the prologue frame size); \
+         got SP_high={sp_high}, SP_low={sp_low}"
+    );
+
+    // The reload step must show A1 (= arg1) holding the spilled
+    // sentinel 0x1234.  This pins both that the spill/reload sequence
+    // round-tripped the value AND that the SP-relative load reads
+    // from the same address the SP-relative store wrote to.
+    let a1 = values_for(&doc, "arg1");
+    assert!(
+        a1.contains(&0x1234),
+        "arg1 should snapshot the reloaded sentinel 0x1234; got {a1:?}"
+    );
+
+    // A0 must surface both the pre-frame sentinel (0x1234) and the
+    // post-spill value (0xCAFE): the recorder must NOT collapse
+    // consecutive register-set events onto the same step entry.
+    let a0 = values_for(&doc, "arg0");
+    assert!(a0.contains(&0x1234), "arg0 should snapshot 0x1234; got {a0:?}");
+    assert!(a0.contains(&0xCAFE), "arg0 should snapshot 0xCAFE; got {a0:?}");
+}
+
+// ===========================================================================
+// pallet_revive_storage_test — canonical host_functions.rs end-to-end
+// ===========================================================================
+//
+// Exercises the canonical pallet-revive storage API
+// (`seal_set_storage` then `seal_get_storage`) end-to-end with
+// argument-register snapshots.  Pre-M11 the `args` Sequence variable
+// did not exist; with M11 in place this fixture becomes the strict
+// pin that the per-step Sequence carries the EXACT pointer / length
+// values the ecalli is invoked with.
+//
+// The fixture sets up the canonical [key_ptr, key_len, value_ptr,
+// value_len] argument vector for each storage op and verifies:
+//
+//   1. Both seal_set_storage and seal_get_storage surface as
+//      Call events on the calltrace pane (in source order).
+//   2. Both ecallis route onto EventLogKind::TraceLogEvent special
+//      events with the canonical metadata content.
+//   3. The per-step `args` Sequence captures the argument-register
+//      values at the step before each ecalli.
+fn pallet_revive_storage_program() -> Vec<Instruction> {
+    vec![
+        // First: seal_set_storage(key_ptr=0x1000, key_len=4,
+        //                         value_ptr=0x1100, value_len=8)
+        asm::load_imm(A0, 0x1000),
+        asm::load_imm(A1, 4),
+        asm::load_imm(A2, 0x1100),
+        asm::load_imm(A3, 8),
+        asm::ecalli(6), // seal_set_storage
+        // Second: seal_get_storage(key_ptr=0x1000, key_len=4,
+        //                          out_ptr=0x2000, out_len_ptr=0x2200)
+        asm::load_imm(A0, 0x1000),
+        asm::load_imm(A1, 4),
+        asm::load_imm(A2, 0x2000),
+        asm::load_imm(A3, 0x2200),
+        asm::ecalli(5), // seal_get_storage
+        // Sentinel
+        asm::load_imm(A0, 0xABCD),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_pallet_revive_storage_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_pallet_revive_storage_via_ct_print_full",
+        "pallet_revive_storage_test",
+        &pallet_revive_storage_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // Functions table must contain main + seal_set_storage +
+    // seal_get_storage in source order.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for f in &["main", "seal_set_storage", "seal_get_storage"] {
+        assert!(
+            functions.iter().any(|fname| fname == f),
+            "expected `{f}` in functions table; got {:?}",
+            functions
+        );
+    }
+
+    let call_sequence = observed_call_sequence(&doc);
+    assert_eq!(
+        call_sequence,
+        vec![
+            "main".to_string(),
+            "seal_set_storage".to_string(),
+            "seal_get_storage".to_string(),
+        ],
+        "call_entry events must appear in entry-point + source-order \
+         (seal_set_storage then seal_get_storage)"
+    );
+
+    // Counts: 1 entry-point Call + 2 ecalli Calls = 3 calls.  Two
+    // io_events: both ecallis route onto EventLogKind::TraceLogEvent,
+    // collapsed to ioStderr by toIOEventKind.
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(3),
+        "expected exactly 3 call events (1 entry-point + 2 ecalli); counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(2),
+        "expected exactly 2 io_events (seal_set_storage + seal_get_storage \
+         both routed onto TraceLogEvent); counts={counts}"
+    );
+
+    // Inspect the io stream in source order.
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "io")
+        .collect();
+    assert_eq!(io_events.len(), 2, "expected exactly 2 io event entries");
+    for (idx, io) in io_events.iter().enumerate() {
+        assert_eq!(
+            io["io_kind"].as_str(),
+            Some("ioStderr"),
+            "io_event[{idx}] should carry io_kind=ioStderr (TraceLogEvent \
+             collapsed by toIOEventKind); got {io}"
+        );
+    }
+    let set_text = io_events[0]["text"].as_str().unwrap_or("");
+    let get_text = io_events[1]["text"].as_str().unwrap_or("");
+    assert!(
+        set_text.contains("key_ptr=0x1000") && set_text.contains("value_len=8"),
+        "first io event must carry the canonical set-storage args; got {set_text:?}"
+    );
+    assert!(
+        get_text.contains("key_ptr=0x1000") && get_text.contains("out_len_ptr=0x2200"),
+        "second io event must carry the canonical get-storage args; got {get_text:?}"
+    );
+
+    // Strict per-step args Sequence check: there must exist a step
+    // whose Sequence snapshots EXACTLY the canonical set-storage
+    // argument vector [0x1000, 4, 0x1100, 8, 0, 0], and another step
+    // whose Sequence snapshots the canonical get-storage vector
+    // [0x1000, 4, 0x2000, 0x2200, 0, 0].  This is the M11 args
+    // Sequence becoming load-bearing.
+    let args_seqs = observed_args_sequence_vars(&doc);
+    let expected_set: [i64; 6] = [0x1000, 4, 0x1100, 8, 0, 0];
+    let expected_get: [i64; 6] = [0x1000, 4, 0x2000, 0x2200, 0, 0];
+    assert!(
+        args_seqs.contains(&expected_set),
+        "expected args Sequence {expected_set:?} (set_storage args) at some \
+         step; got {args_seqs:?}"
+    );
+    assert!(
+        args_seqs.contains(&expected_get),
+        "expected args Sequence {expected_get:?} (get_storage args) at some \
+         step; got {args_seqs:?}"
+    );
 }
