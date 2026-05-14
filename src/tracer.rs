@@ -31,6 +31,7 @@ thread_local! {
     /// arm without affecting sibling tests running in parallel on
     /// other threads.  See `set_thread_local_gas_limit`.
     static THREAD_GAS_LIMIT: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+
 }
 
 /// Override the gas limit for recordings on the current thread.
@@ -46,6 +47,7 @@ thread_local! {
 pub fn set_thread_local_gas_limit(limit: Option<i64>) {
     THREAD_GAS_LIMIT.with(|cell| cell.set(limit));
 }
+
 
 // The recorder is CTFS-only per `Recorder-CLI-Conventions.md` §4 (see
 // `codetracer-specs`).  We pin every `create_trace_writer` call site to
@@ -122,6 +124,14 @@ impl PolkaVmTracer {
         // -- 3. Create engine and module with step tracing -------------------------------
         let engine_config = Config::from_env()
             .map_err(|e| eyre!("failed to parse PolkaVM config from environment: {e}"))?;
+
+        // Optional opt-in dynamic paging: a thread-local override
+        // (set by tests via `set_thread_local_dynamic_paging`) toggles
+        // on PolkaVM's dynamic paging.  When enabled, out-of-bounds
+        // memory accesses surface as `InterruptKind::Segfault` with the
+        // offending page address; when disabled (the default), they
+        // collapse onto the generic `Trap` arm.  Tests that exercise
+        // the dedicated segfault taxonomy enable it here.
         let engine = Engine::new(&engine_config)
             .map_err(|e| eyre!("failed to create PolkaVM engine: {e}"))?;
 
@@ -503,12 +513,49 @@ impl PolkaVmTracer {
                         step_count,
                         instance.program_counter()
                     );
-                    TraceWriter::register_special_event(
-                        &mut *self.writer,
-                        EventLogKind::Error,
-                        "polkavm_trap",
-                        &format!("step={step_count} pc={:?}", instance.program_counter()),
-                    );
+
+                    // Disambiguate the trap taxonomy:
+                    //
+                    //   * If the trap PC points at a memory load/store
+                    //     instruction, the trap was an out-of-bounds
+                    //     access (PolkaVM collapses segfaults onto Trap
+                    //     when dynamic paging is not enabled — see
+                    //     `InterruptKind::Trap` docs).  Emit a dedicated
+                    //     `polkavm_segfault` Error special event with
+                    //     the offending effective address, matching the
+                    //     metadata schema of the dynamic-paging
+                    //     Segfault arm above.
+                    //   * Otherwise, fall back to the generic
+                    //     `polkavm_trap` event (e.g. `trap` instruction
+                    //     deliberately executed, invalid opcode).
+                    //
+                    // The M12 sbrk-out-of-bounds fixture pins this
+                    // behaviour: `tests/test_recorder_coverage.rs::
+                    //  test_sbrk_out_of_bounds_via_ct_print_full`.
+                    let trap_pc = instance.program_counter();
+                    let memory_access_info = trap_pc
+                        .and_then(|pc| instruction_at_pc.get(&pc.0))
+                        .and_then(|instr| describe_memory_access(*instr, instance));
+
+                    if let Some((op_name, effective_addr, access_size)) = memory_access_info {
+                        TraceWriter::register_special_event(
+                            &mut *self.writer,
+                            EventLogKind::Error,
+                            "polkavm_segfault",
+                            &format!(
+                                "step={step_count} pc={trap_pc:?} op={op_name} \
+                                 page_address={effective_addr:#x} \
+                                 page_size={access_size} write_protected=false"
+                            ),
+                        );
+                    } else {
+                        TraceWriter::register_special_event(
+                            &mut *self.writer,
+                            EventLogKind::Error,
+                            "polkavm_trap",
+                            &format!("step={step_count} pc={trap_pc:?}"),
+                        );
+                    }
                     TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                     break;
                 }
@@ -687,21 +734,39 @@ impl PolkaVmTracer {
                         break;
                     }
                 }
-                InterruptKind::Segfault(_segfault) => {
+                InterruptKind::Segfault(segfault) => {
                     eprintln!(
-                        "Segfault at step {} (pc: {:?})",
+                        "Segfault at step {} (pc: {:?}) page_address={:#x} \
+                         page_size={} write_protected={}",
                         step_count,
-                        instance.program_counter()
+                        instance.program_counter(),
+                        segfault.page_address,
+                        segfault.page_size,
+                        segfault.is_write_protected,
                     );
                     // Route the trap onto the structured error channel so
                     // the frontend surfaces it as a runtime failure rather
                     // than dropping it silently (mirrors Cairo 1.50
                     // CairoPanic and Fuel 1.53 Panic/Revert routing).
+                    //
+                    // The metadata content carries the offending page
+                    // address and page size, which the M12 segfault
+                    // fixture (`tests/test_recorder_coverage.rs::
+                    //  test_sbrk_out_of_bounds_via_ct_print_full`) pins
+                    // strictly so a future regression that drops the
+                    // segfault details surfaces immediately.
                     TraceWriter::register_special_event(
                         &mut *self.writer,
                         EventLogKind::Error,
                         "polkavm_segfault",
-                        &format!("step={step_count} pc={:?}", instance.program_counter()),
+                        &format!(
+                            "step={step_count} pc={:?} page_address={:#x} \
+                             page_size={} write_protected={}",
+                            instance.program_counter(),
+                            segfault.page_address,
+                            segfault.page_size,
+                            segfault.is_write_protected,
+                        ),
                     );
                     TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                     break;
@@ -826,5 +891,47 @@ fn detect_misalign(
                 "step={step_count} op={op_name} addr={effective_addr:#x} size={access_size}"
             ),
         );
+    }
+}
+
+/// If `instruction` is a memory load/store, return the operation name,
+/// the effective target address and the access size.  Used by the Trap
+/// arm of `run_step_loop` to disambiguate an out-of-bounds memory
+/// access (which PolkaVM collapses onto Trap when dynamic paging is
+/// off) from a deliberate `trap` instruction or invalid opcode.
+fn describe_memory_access(
+    instruction: Instruction,
+    instance: &polkavm::RawInstance,
+) -> Option<(&'static str, u64, u32)> {
+    let direct = |op_name, imm: u32, size: u32| Some((op_name, imm as u64, size));
+    let indirect = |op_name, base: polkavm_common::program::RawReg, imm: u32, size: u32| {
+        let base_val = instance.reg(base.get());
+        Some((op_name, base_val.wrapping_add(imm as u64), size))
+    };
+
+    match instruction {
+        Instruction::load_u8(_, imm) => direct("load_u8", imm, 1),
+        Instruction::load_i8(_, imm) => direct("load_i8", imm, 1),
+        Instruction::load_u16(_, imm) => direct("load_u16", imm, 2),
+        Instruction::load_i16(_, imm) => direct("load_i16", imm, 2),
+        Instruction::load_u32(_, imm) => direct("load_u32", imm, 4),
+        Instruction::load_i32(_, imm) => direct("load_i32", imm, 4),
+        Instruction::load_u64(_, imm) => direct("load_u64", imm, 8),
+        Instruction::store_u8(_, imm) => direct("store_u8", imm, 1),
+        Instruction::store_u16(_, imm) => direct("store_u16", imm, 2),
+        Instruction::store_u32(_, imm) => direct("store_u32", imm, 4),
+        Instruction::store_u64(_, imm) => direct("store_u64", imm, 8),
+        Instruction::load_indirect_u8(_, base, off) => indirect("load_indirect_u8", base, off, 1),
+        Instruction::load_indirect_i8(_, base, off) => indirect("load_indirect_i8", base, off, 1),
+        Instruction::load_indirect_u16(_, base, off) => indirect("load_indirect_u16", base, off, 2),
+        Instruction::load_indirect_i16(_, base, off) => indirect("load_indirect_i16", base, off, 2),
+        Instruction::load_indirect_u32(_, base, off) => indirect("load_indirect_u32", base, off, 4),
+        Instruction::load_indirect_i32(_, base, off) => indirect("load_indirect_i32", base, off, 4),
+        Instruction::load_indirect_u64(_, base, off) => indirect("load_indirect_u64", base, off, 8),
+        Instruction::store_indirect_u8(_, base, off) => indirect("store_indirect_u8", base, off, 1),
+        Instruction::store_indirect_u16(_, base, off) => indirect("store_indirect_u16", base, off, 2),
+        Instruction::store_indirect_u32(_, base, off) => indirect("store_indirect_u32", base, off, 4),
+        Instruction::store_indirect_u64(_, base, off) => indirect("store_indirect_u64", base, off, 8),
+        _ => None,
     }
 }
