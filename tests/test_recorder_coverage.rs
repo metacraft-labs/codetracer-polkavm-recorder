@@ -1839,3 +1839,1015 @@ fn test_pallet_revive_storage_via_ct_print_full() {
          step; got {args_seqs:?}"
     );
 }
+
+// ===========================================================================
+// bitwise_test — and / or / xor / shift family
+// ===========================================================================
+//
+// Pre-M12 only the 12 conditional-branch family had explicit coverage of
+// the PolkaVM ALU instruction surface; the bitwise / shift family was
+// completely uncovered.  This fixture exercises every distinct opcode in
+// the set:
+//
+//   * `and`, `or`, `xor`             (reg-reg-reg)
+//   * `and_imm`, `or_imm`, `xor_imm` (reg-reg-imm)
+//   * `shift_logical_left_imm_32`,
+//     `shift_logical_right_imm_32`,
+//     `shift_arithmetic_right_imm_32` (reg-reg-imm)
+//   * `shift_logical_left_32`,
+//     `shift_logical_right_32`,
+//     `shift_arithmetic_right_32`    (reg-reg-reg)
+//
+// Inputs:
+//   A0 = 0xCAFE_F00D (top bit set → arithmetic-shift sign-extends)
+//   A1 = 0x0F0F_0F0F
+//
+// Each ALU result is parked in a distinct destination register so the
+// recorder's per-step register snapshot exposes the value for strict
+// per-step pinning.  Shift amounts are swept across 0/4/16/31 to cover
+// the no-shift edge, mid-range, half-word and full-word boundaries.
+fn bitwise_program() -> Vec<Instruction> {
+    vec![
+        // -- 0 -- Setup
+        asm::load_imm(A0, 0xCAFE_F00D),
+        // -- 1 --
+        asm::load_imm(A1, 0x0F0F_0F0F),
+        // -- 2 -- and
+        asm::and(S0, A0, A1),
+        // -- 3 -- or
+        asm::or(S1, A0, A1),
+        // -- 4 -- xor
+        asm::xor(T0, A0, A1),
+        // -- 5 -- and_imm
+        asm::and_imm(T1, A0, 0x0F0F_0F0F),
+        // -- 6 -- or_imm
+        asm::or_imm(T2, A0, 0x0000_00FF),
+        // -- 7 -- xor_imm
+        asm::xor_imm(A2, A0, 0xFFFF_FFFF),
+        // -- 8 -- shl by 0 (no-shift edge)
+        asm::shift_logical_left_imm_32(A3, A0, 0),
+        // -- 9 -- shl by 4
+        asm::shift_logical_left_imm_32(A3, A0, 4),
+        // -- 10 -- shl by 16
+        asm::shift_logical_left_imm_32(A3, A0, 16),
+        // -- 11 -- shl by 31
+        asm::shift_logical_left_imm_32(A3, A0, 31),
+        // -- 12 -- shr (logical) by 4
+        asm::shift_logical_right_imm_32(A4, A0, 4),
+        // -- 13 -- shr (logical) by 16
+        asm::shift_logical_right_imm_32(A4, A0, 16),
+        // -- 14 -- shr (logical) by 31
+        asm::shift_logical_right_imm_32(A4, A0, 31),
+        // -- 15 -- shr (arithmetic) by 4
+        asm::shift_arithmetic_right_imm_32(A5, A0, 4),
+        // -- 16 -- shr (arithmetic) by 16
+        asm::shift_arithmetic_right_imm_32(A5, A0, 16),
+        // -- 17 -- shr (arithmetic) by 31
+        asm::shift_arithmetic_right_imm_32(A5, A0, 31),
+        // -- 18 -- shl reg-reg: S0 = A0 << (A1 & 0x1F).  A1 = 0x0F0F_0F0F,
+        //          low-5 bits = 0x0F = 15.
+        asm::shift_logical_left_32(S0, A0, A1),
+        // -- 19 -- shr-logical reg-reg
+        asm::shift_logical_right_32(S1, A0, A1),
+        // -- 20 -- shr-arithmetic reg-reg
+        asm::shift_arithmetic_right_32(T0, A0, A1),
+        // -- 21 -- ret
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_bitwise_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_bitwise_via_ct_print_full",
+        "bitwise_test",
+        &bitwise_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // The functions table must contain only the synthesised entry-point
+    // Call(main): no in-program subroutine call, no ecalli.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "bitwise_test must register only the entry-point `main`; got {:?}",
+        functions
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "bitwise_test must emit only the entry-point Call(main); a bitwise \
+         op is not a function-call boundary"
+    );
+
+    let counts = &doc["counts"];
+    // 22 instructions execute (indices 0..=21); each lands on a distinct
+    // PolkaVM-source-mapper line, plus the recorder's synthetic initial
+    // entry step.  Total: 23 step events.
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(23),
+        "expected 23 step events (initial entry + 22 instr lines); counts={counts}"
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the synthesised entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "bitwise_test must not emit any io_events; counts={counts}"
+    );
+
+    // Strict per-destination-register value pins.  PolkaVM stores
+    // each 32-bit register as the low half of a 64-bit slot; the
+    // ct-print --full decoder surfaces it as `instance.reg(...) as i64`,
+    // which preserves the underlying u64 bit pattern.  In the
+    // Latest32 ISA the upper 32 bits are zero, so 32-bit results with
+    // the top bit set surface as POSITIVE i64 values (zero-extended,
+    // not sign-extended).
+    //
+    // 0xCAFE_F00D = 3_405_705_229 — that exact i64 is what every
+    // snapshot of A0 carries across the bitwise sequence.
+    let a0 = values_for(&doc, "arg0");
+    let a1 = values_for(&doc, "arg1");
+    let s0 = values_for(&doc, "S0");
+    let s1 = values_for(&doc, "S1");
+    let t0 = values_for(&doc, "T0");
+    let t1 = values_for(&doc, "T1");
+    let t2 = values_for(&doc, "T2");
+    let a2 = values_for(&doc, "arg2");
+    let a3 = values_for(&doc, "arg3");
+    let a4 = values_for(&doc, "arg4");
+    let a5 = values_for(&doc, "arg5");
+
+    let cafe: i64 = 0xCAFE_F00D;
+    assert!(
+        a0.contains(&cafe),
+        "A0 should snapshot 0xCAFE_F00D ({cafe}); got {a0:?}"
+    );
+    assert!(
+        a1.contains(&0x0F0F_0F0F),
+        "A1 should snapshot 0x0F0F_0F0F; got {a1:?}"
+    );
+
+    // and: 0xCAFE_F00D & 0x0F0F_0F0F = 0x0A0E_000D
+    assert!(
+        s0.contains(&0x0A0E_000D),
+        "S0 should snapshot the AND result 0x0A0E_000D; got {s0:?}"
+    );
+    // or: 0xCAFE_F00D | 0x0F0F_0F0F = 0xCFFF_FF0F
+    assert!(
+        s1.contains(&0xCFFF_FF0F),
+        "S1 should snapshot the OR result 0xCFFF_FF0F; got {s1:?}"
+    );
+    // xor: 0xCAFE_F00D ^ 0x0F0F_0F0F = 0xC5F1_FF02
+    assert!(
+        t0.contains(&0xC5F1_FF02),
+        "T0 should snapshot the XOR result 0xC5F1_FF02; got {t0:?}"
+    );
+    // and_imm: identical to and
+    assert!(
+        t1.contains(&0x0A0E_000D),
+        "T1 should snapshot the AND-imm result 0x0A0E_000D; got {t1:?}"
+    );
+    // or_imm: 0xCAFE_F00D | 0xFF = 0xCAFE_F0FF
+    assert!(
+        t2.contains(&0xCAFE_F0FF),
+        "T2 should snapshot the OR-imm result 0xCAFE_F0FF; got {t2:?}"
+    );
+    // xor_imm with 0xFFFF_FFFF flips every bit: ~0xCAFE_F00D = 0x3501_0FF2
+    assert!(
+        a2.contains(&0x3501_0FF2),
+        "A2 should snapshot the bitwise NOT (xor_imm 0xFFFF_FFFF) = 0x3501_0FF2; got {a2:?}"
+    );
+
+    // Shifts on 0xCAFE_F00D.  PolkaVM's *_32 shifts mask the shift
+    // amount to 5 bits (RISC-V semantics), so an immediate of 31 is
+    // the maximum effective shift.
+    //
+    // shl 0  = 0xCAFE_F00D (no-op)
+    // shl 4  = 0xAFEF_00D0
+    // shl 16 = 0xF00D_0000
+    // shl 31 = 0x8000_0000
+    assert!(
+        a3.contains(&cafe),
+        "A3 should snapshot the shl-by-0 (no-op) value 0xCAFE_F00D; got {a3:?}"
+    );
+    assert!(
+        a3.contains(&0xAFEF_00D0),
+        "A3 should snapshot the shl-by-4 result 0xAFEF_00D0; got {a3:?}"
+    );
+    assert!(
+        a3.contains(&0xF00D_0000),
+        "A3 should snapshot the shl-by-16 result 0xF00D_0000; got {a3:?}"
+    );
+    assert!(
+        a3.contains(&0x8000_0000),
+        "A3 should snapshot the shl-by-31 result 0x8000_0000; got {a3:?}"
+    );
+
+    // Logical right shift on 0xCAFE_F00D:
+    // shr 4  = 0x0CAF_EF00
+    // shr 16 = 0x0000_CAFE
+    // shr 31 = 0x0000_0001
+    assert!(
+        a4.contains(&0x0CAF_EF00),
+        "A4 should snapshot the shrl-by-4 result 0x0CAF_EF00; got {a4:?}"
+    );
+    assert!(
+        a4.contains(&0xCAFE),
+        "A4 should snapshot the shrl-by-16 result 0xCAFE; got {a4:?}"
+    );
+    assert!(
+        a4.contains(&1),
+        "A4 should snapshot the shrl-by-31 result 1 (top bit only); got {a4:?}"
+    );
+
+    // Arithmetic right shift on 0xCAFE_F00D (top bit set → sign-fill).
+    // The 32-bit signed shift result is then placed in the 64-bit
+    // register slot; whether PolkaVM stores the value zero- or
+    // sign-extended into the upper 32 bits is the load-bearing pin
+    // here.  We pin the EXACT u64-bit-pattern-as-i64 the recorder
+    // surfaces by computing via wrapping_shr on i32 and casting to u32
+    // first to drop the upper 32 bits, then to i64 (zero-extension).
+    let shra4: i64 = ((0xCAFE_F00Du32 as i32).wrapping_shr(4)) as u32 as i64;
+    let shra16: i64 = ((0xCAFE_F00Du32 as i32).wrapping_shr(16)) as u32 as i64;
+    let shra31: i64 = ((0xCAFE_F00Du32 as i32).wrapping_shr(31)) as u32 as i64;
+    assert!(
+        a5.contains(&shra4),
+        "A5 should snapshot the shra-by-4 result {shra4:#x}; got {a5:?}"
+    );
+    assert!(
+        a5.contains(&shra16),
+        "A5 should snapshot the shra-by-16 result {shra16:#x}; got {a5:?}"
+    );
+    assert!(
+        a5.contains(&shra31),
+        "A5 should snapshot the shra-by-31 result {shra31:#x}; got {a5:?}"
+    );
+
+    // Reg-reg shift: A1 = 0x0F0F_0F0F, low-5 bits = 0x0F = 15.
+    let shift_amt: u32 = 0x0F0F_0F0Fu32 & 0x1F; // == 15
+    let shl_rr: i64 = (0xCAFE_F00Du32.wrapping_shl(shift_amt)) as i64;
+    let shrl_rr: i64 = (0xCAFE_F00Du32.wrapping_shr(shift_amt)) as i64;
+    let shra_rr: i64 = ((0xCAFE_F00Du32 as i32).wrapping_shr(shift_amt)) as u32 as i64;
+    assert!(
+        s0.contains(&shl_rr),
+        "S0 should snapshot the reg-reg SHL result {shl_rr:#x}; got {s0:?}"
+    );
+    assert!(
+        s1.contains(&shrl_rr),
+        "S1 should snapshot the reg-reg SHRL result {shrl_rr:#x}; got {s1:?}"
+    );
+    assert!(
+        t0.contains(&shra_rr),
+        "T0 should snapshot the reg-reg SHRA result {shra_rr:#x}; got {t0:?}"
+    );
+}
+
+// ===========================================================================
+// mul_div_test — multiplication / division / remainder family
+// ===========================================================================
+//
+// Pre-M12 the recorder's coverage of arithmetic instructions stopped at
+// `add_*` / `sub_*` (loop_test / memory_test) and a single
+// `div_unsigned_32` (divide_by_zero_test).  This fixture exercises the
+// remaining ALU multiplicative surface in the Latest32 ISA:
+//
+//   * `mul_32` (reg-reg-reg), `mul_imm_32` (reg-reg-imm)
+//   * `mul_upper_signed_signed` (the wide-multiply variant exposing the
+//     upper 32 bits of the signed×signed product)
+//   * `div_unsigned_32`, `div_signed_32` (signed/unsigned division)
+//   * `rem_unsigned_32`, `rem_signed_32` (signed/unsigned remainder)
+//
+// The four test cases stress sign handling at every quadrant boundary:
+//
+//   1. POS/POS:    100 / 7   → q=14, r=2
+//   2. NEG/POS:   -100 / 7   → q=-14 (i32 truncation), r=-2
+//   3. POS/NEG:    100 / -7  → q=-14, r=2
+//   4. INT_MIN/-1: special-cased by PolkaVM (RISC-V semantics):
+//      `div_signed_32`: returns INT_MIN (no overflow trap)
+//      `rem_signed_32`: returns 0
+//   See `polkavm-common/src/operation.rs::div/rem`.
+//
+// Each result lands in a distinct register so the per-step register
+// snapshot exposes the value for strict pinning.
+fn mul_div_program() -> Vec<Instruction> {
+    vec![
+        // -- 0 -- mul: A0 = 6 * 7 = 42
+        asm::load_imm(A0, 6),
+        // -- 1 --
+        asm::load_imm(A1, 7),
+        // -- 2 --
+        asm::mul_32(A2, A0, A1),
+        // -- 3 -- mul_imm: A3 = A0 * 100 = 600
+        asm::mul_imm_32(A3, A0, 100),
+        // -- 4 -- mul_upper_signed_signed: T0 = (A0 * A1) >> 32 (signed)
+        //          = 0 (small positive product fits in lower 32)
+        asm::mul_upper_signed_signed(T0, A0, A1),
+        // ---- Division / remainder, four sign-quadrant cases ----
+        // Case 1: POS / POS
+        // -- 5 --
+        asm::load_imm(S0, 100),
+        // -- 6 --
+        asm::load_imm(S1, 7),
+        // -- 7 --
+        asm::div_unsigned_32(T1, S0, S1), // 100 / 7 = 14
+        // -- 8 --
+        asm::rem_unsigned_32(T2, S0, S1), // 100 % 7 = 2
+        // Case 2: NEG / POS  → use signed div
+        // -- 9 --
+        asm::load_imm(S0, (-100i32) as u32),
+        // -- 10 --
+        asm::div_signed_32(A4, S0, S1), // -100 / 7 = -14
+        // -- 11 --
+        asm::rem_signed_32(A5, S0, S1), // -100 % 7 = -2
+        // Case 3: POS / NEG
+        // -- 12 --
+        asm::load_imm(S0, 100),
+        // -- 13 --
+        asm::load_imm(S1, (-7i32) as u32),
+        // -- 14 --
+        asm::div_signed_32(T0, S0, S1), // 100 / -7 = -14
+        // -- 15 --
+        asm::rem_signed_32(T1, S0, S1), // 100 % -7 = 2
+        // Case 4: INT_MIN / -1
+        // -- 16 --
+        asm::load_imm(S0, i32::MIN as u32),
+        // -- 17 --
+        asm::load_imm(S1, (-1i32) as u32),
+        // -- 18 --
+        asm::div_signed_32(T2, S0, S1), // INT_MIN / -1 = INT_MIN (no overflow trap)
+        // -- 19 --
+        asm::rem_signed_32(A2, S0, S1), // INT_MIN % -1 = 0
+        // -- 20 --
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_mul_div_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_mul_div_via_ct_print_full",
+        "mul_div_test",
+        &mul_div_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // No host calls; only the synthesised entry-point Call(main).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "mul_div_test must register only the entry-point `main`; got {:?}",
+        functions
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "mul_div_test must emit only the entry-point Call(main)"
+    );
+
+    let counts = &doc["counts"];
+    // 21 instructions execute (indices 0..=20), each on a distinct line,
+    // plus the recorder's synthetic initial entry step → 22 step events.
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(22),
+        "expected 22 step events (initial entry + 21 instr lines); counts={counts}"
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    // No divisor is zero in this fixture → divide_by_zero arm of the
+    // recorder must NOT fire, so io_events stays at 0.
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "mul_div_test must not emit any io_events (no zero divisors); counts={counts}"
+    );
+
+    let a2 = values_for(&doc, "arg2");
+    let a3 = values_for(&doc, "arg3");
+    let a4 = values_for(&doc, "arg4");
+    let a5 = values_for(&doc, "arg5");
+    let s0 = values_for(&doc, "S0");
+    let s1 = values_for(&doc, "S1");
+    let t0 = values_for(&doc, "T0");
+    let t1 = values_for(&doc, "T1");
+    let t2 = values_for(&doc, "T2");
+
+    // ---- Multiplication ----
+    // mul_32: A2 = 6 * 7 = 42
+    assert!(
+        a2.contains(&42),
+        "A2 should snapshot the mul result 42; got {a2:?}"
+    );
+    // mul_imm_32: A3 = 6 * 100 = 600
+    assert!(
+        a3.contains(&600),
+        "A3 should snapshot the mul_imm result 600; got {a3:?}"
+    );
+    // mul_upper_signed_signed: (6 * 7) >> 32 = 0
+    assert!(
+        t0.contains(&0),
+        "T0 should snapshot the mul_upper result 0 (small product); got {t0:?}"
+    );
+
+    // ---- Division: Case 1 (POS/POS) ----
+    // T1 = 100 / 7 = 14 (and again later as POS%NEG remainder = 2 — see below).
+    assert!(
+        t1.contains(&14),
+        "T1 should snapshot the div_unsigned 100/7 = 14; got {t1:?}"
+    );
+    // T2 = 100 % 7 = 2 (initial unsigned), then later T2 = INT_MIN/-1 = INT_MIN.
+    assert!(
+        t2.contains(&2),
+        "T2 should snapshot the rem_unsigned 100%7 = 2; got {t2:?}"
+    );
+
+    // ---- Division: Case 2 (NEG/POS), signed ----
+    // div_signed_32: -100 / 7 = -14.  PolkaVM stores the 32-bit result
+    // in the 64-bit register slot WITHOUT sign-extending, so a negative
+    // i32 value surfaces as the unsigned interpretation 0xFFFF_FFF2 etc.
+    // Compute the exact value the recorder emits: cast via u32 to drop
+    // upper 32 bits, then to i64 (zero-extension).
+    let neg14: i64 = (-14i32) as u32 as i64;
+    let neg2: i64 = (-2i32) as u32 as i64;
+    assert!(
+        a4.contains(&neg14),
+        "A4 should snapshot the div_signed -100/7 = -14 (as zero-ext u32 \
+         = {neg14}); got {a4:?}"
+    );
+    assert!(
+        a5.contains(&neg2),
+        "A5 should snapshot the rem_signed -100%7 = -2 (as zero-ext u32 \
+         = {neg2}); got {a5:?}"
+    );
+
+    // ---- Division: Case 3 (POS/NEG) ----
+    // T0 = 100 / -7 = -14 (signed); T1 = 100 % -7 = 2 (sign of dividend).
+    assert!(
+        t0.contains(&neg14),
+        "T0 should snapshot the div_signed 100/-7 = -14 (zero-ext = \
+         {neg14}); got {t0:?}"
+    );
+    // T1 = 2 was already pinned above as part of the unsigned case;
+    // pin again that the rem_signed case still yields 2.
+    assert!(
+        t1.contains(&2),
+        "T1 should snapshot the rem_signed 100%-7 = 2; got {t1:?}"
+    );
+
+    // ---- Division: Case 4 (INT_MIN / -1) ----
+    // PolkaVM follows RISC-V semantics: div_signed(INT_MIN, -1) = INT_MIN
+    // (no overflow trap), rem_signed(INT_MIN, -1) = 0.
+    let int_min_zext: i64 = (i32::MIN as u32) as i64; // = 0x8000_0000 = 2_147_483_648
+    assert!(
+        t2.contains(&int_min_zext),
+        "T2 should snapshot div_signed(INT_MIN,-1) = INT_MIN (zero-ext = \
+         {int_min_zext}); got {t2:?}"
+    );
+    assert!(
+        a2.contains(&0),
+        "A2 should snapshot rem_signed(INT_MIN,-1) = 0; got {a2:?}"
+    );
+
+    // Sanity: S0 must visit each of the four dividend setups, and S1
+    // each of the divisor setups.
+    for expected in [100i64, (-100i32) as u32 as i64, i32::MIN as u32 as i64] {
+        assert!(
+            s0.contains(&expected),
+            "S0 must snapshot dividend {expected:#x}; got {s0:?}"
+        );
+    }
+    for expected in [7i64, (-7i32) as u32 as i64, (-1i32) as u32 as i64] {
+        assert!(
+            s1.contains(&expected),
+            "S1 must snapshot divisor {expected:#x}; got {s1:?}"
+        );
+    }
+}
+
+// ===========================================================================
+// memory_load_store_test — every load/store width offered by Latest32
+// ===========================================================================
+//
+// Pre-M12 only `store_indirect_u32` / `load_indirect_i32` were exercised
+// (by `stack_frame_test`).  This fixture covers the remaining widths the
+// Latest32 ISA exposes:
+//
+//   * store_indirect_u8  / load_indirect_u8  / load_indirect_i8
+//   * store_indirect_u16 / load_indirect_u16 / load_indirect_i16
+//   * store_indirect_u32 / load_indirect_i32
+//
+// (The Latest32 ISA has no direct `load_u32`, no `load_u64`, no
+// `store_u64` and no 32-/64-bit-indirect-unsigned loads — those live
+// only in the Latest64 ISA.  We pin the surface PolkaVM actually
+// supports for the recorder's chosen ISA; if the recorder later
+// switches to Latest64 this test extends naturally.)
+//
+// The fixture allocates a 16-byte stack frame (SP - 16 .. SP) and
+// stages a chain of stores into the SP-relative slots, then reads back
+// each value via the matching load instruction into a different
+// register.  This exercises the round-trip per width and pins both:
+//
+//   1. The post-load register snapshot equals the pre-store value
+//      (memory round-trips correctly).
+//   2. The signed vs unsigned load instructions surface DIFFERENT
+//      i64 values for the same byte/halfword pattern when the high
+//      bit is set (PolkaVM zero-extends the load into the 64-bit
+//      register slot, so the signed `_i8` / `_i16` loads still
+//      surface as positive values whose top 32 bits are zero — but
+//      the LOW bits differ from the unsigned load by sign-extension
+//      across the byte/halfword boundary).
+fn memory_load_store_program() -> Vec<Instruction> {
+    vec![
+        // -- 0 -- Allocate a 16-byte frame: SP -= 16
+        asm::add_imm_32(SP, SP, (-16i32) as u32),
+        // ---- Stores ----
+        // -- 1 -- store_indirect_u8(value=0xAB, base=SP, offset=0)
+        asm::load_imm(A0, 0xAB),
+        // -- 2 --
+        asm::store_indirect_u8(A0, SP, 0),
+        // -- 3 -- store_indirect_u16(value=0xCD12, base=SP, offset=2)
+        //          (offset=2 keeps the halfword 2-byte-aligned so the
+        //           recorder's misalign detector stays quiet)
+        asm::load_imm(A0, 0xCD12),
+        // -- 4 --
+        asm::store_indirect_u16(A0, SP, 2),
+        // -- 5 -- store_indirect_u32(value=0xDEAD_BEEF, base=SP, offset=4)
+        asm::load_imm(A0, 0xDEAD_BEEF),
+        // -- 6 --
+        asm::store_indirect_u32(A0, SP, 4),
+        // -- 7 -- second u8 store with high bit set, for sign-loads
+        asm::load_imm(A0, 0xFF),
+        // -- 8 --
+        asm::store_indirect_u8(A0, SP, 8),
+        // -- 9 -- second u16 store with high bit set, for sign-loads
+        asm::load_imm(A0, 0x80FE),
+        // -- 10 --
+        asm::store_indirect_u16(A0, SP, 10),
+        // ---- Loads ----
+        // -- 11 -- load u8 (zero-ext) at offset 0: 0xAB
+        asm::load_indirect_u8(S0, SP, 0),
+        // -- 12 -- load i8 (sign-ext as i32 → zero-ext to u32 → i64)
+        //           at offset 8 reads 0xFF, sign-extends to 0xFFFFFFFF
+        asm::load_indirect_i8(S1, SP, 8),
+        // -- 13 -- load u16 at offset 2: 0xCD12
+        asm::load_indirect_u16(T0, SP, 2),
+        // -- 14 -- load i16 at offset 10: 0x80FE → sign-ext to 0xFFFF80FE
+        asm::load_indirect_i16(T1, SP, 10),
+        // -- 15 -- load i32 at offset 4: 0xDEAD_BEEF (top bit set; the
+        //          register surfaces the unsigned 32-bit interpretation
+        //          since PolkaVM zero-extends into the 64-bit slot)
+        asm::load_indirect_i32(T2, SP, 4),
+        // -- 16 -- second u8 (zero-ext) at offset 8: 0xFF
+        asm::load_indirect_u8(A1, SP, 8),
+        // -- 17 -- second u16 (zero-ext) at offset 10: 0x80FE
+        asm::load_indirect_u16(A2, SP, 10),
+        // ---- Cleanup ----
+        // -- 18 -- restore SP
+        asm::add_imm_32(SP, SP, 16),
+        // -- 19 --
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_memory_load_store_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_memory_load_store_via_ct_print_full",
+        "memory_load_store_test",
+        &memory_load_store_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "memory_load_store_test must register only the entry-point `main`; \
+         got {:?}",
+        functions
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "memory_load_store_test must emit only the entry-point Call(main)"
+    );
+
+    let counts = &doc["counts"];
+    // 20 instructions execute (indices 0..=19), each on its own line,
+    // plus the synthetic initial entry step → 21 step events.
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(21),
+        "expected 21 step events (initial entry + 20 instr lines); counts={counts}"
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    // Every store/load offset (0/2/4/8/10) is properly aligned to its
+    // access width, so the recorder's misalign detector must NOT fire.
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "memory_load_store_test must not emit any io_events (every \
+         access is properly aligned); counts={counts}"
+    );
+
+    let s0 = values_for(&doc, "S0");
+    let s1 = values_for(&doc, "S1");
+    let t0 = values_for(&doc, "T0");
+    let t1 = values_for(&doc, "T1");
+    let t2 = values_for(&doc, "T2");
+    let a1 = values_for(&doc, "arg1");
+    let a2 = values_for(&doc, "arg2");
+
+    // ---- u8 round-trip ----
+    // S0 = load_u8 of the previously-stored 0xAB
+    assert!(
+        s0.contains(&0xAB),
+        "S0 should snapshot the u8 round-trip 0xAB; got {s0:?}"
+    );
+    // A1 = second u8 round-trip (0xFF, top bit set → unsigned still 0xFF)
+    assert!(
+        a1.contains(&0xFF),
+        "A1 should snapshot the second u8 round-trip 0xFF; got {a1:?}"
+    );
+
+    // ---- i8 sign-extension ----
+    // S1 = load_i8 of 0xFF → sign-extends to i32 = -1.  PolkaVM stores
+    // the 32-bit signed result into the 64-bit register slot WITHOUT
+    // sign-extending the upper 32 bits, so the surface is the unsigned
+    // u32 interpretation 0xFFFF_FFFF = 4_294_967_295.
+    let i8_neg1: i64 = (-1i32) as u32 as i64;
+    assert!(
+        s1.contains(&i8_neg1),
+        "S1 should snapshot load_i8 0xFF sign-ext-to-i32 = -1, surfaced \
+         as zero-ext u32 = {i8_neg1}; got {s1:?}"
+    );
+
+    // ---- u16 round-trip ----
+    // T0 = load_u16 of 0xCD12 (top bit clear within the halfword)
+    assert!(
+        t0.contains(&0xCD12),
+        "T0 should snapshot the u16 round-trip 0xCD12; got {t0:?}"
+    );
+    // A2 = unsigned reload of the 0x80FE halfword (no sign-ext)
+    assert!(
+        a2.contains(&0x80FE),
+        "A2 should snapshot the u16 round-trip 0x80FE; got {a2:?}"
+    );
+
+    // ---- i16 sign-extension ----
+    // T1 = load_i16 of 0x80FE → sign-ext to i32 = 0xFFFF80FE → surfaced
+    // as zero-ext u32 = 4_294_934_270
+    let i16_sext: i64 = (0xFFFF_80FEu32) as i64;
+    assert!(
+        t1.contains(&i16_sext),
+        "T1 should snapshot load_i16 0x80FE sign-ext = {i16_sext:#x}; \
+         got {t1:?}"
+    );
+
+    // ---- u32 (via load_indirect_i32) round-trip ----
+    // T2 = load_i32 of 0xDEAD_BEEF (top bit set → as i32 negative).
+    // The 64-bit register slot carries the zero-ext u32 = 0xDEAD_BEEF.
+    assert!(
+        t2.contains(&0xDEAD_BEEF),
+        "T2 should snapshot load_i32 0xDEAD_BEEF (zero-ext = 0xDEAD_BEEF); \
+         got {t2:?}"
+    );
+}
+
+// ===========================================================================
+// sbrk_out_of_bounds_test — Segfault termination arm
+// ===========================================================================
+//
+// Pre-M12 the recorder's `InterruptKind::Segfault` arm only emitted a
+// `polkavm_segfault` Error special event with `step=N pc=...`; it
+// dropped the offending page address and page size on the floor, so the
+// frontend had nothing to point the user at.  M12 extends the arm to
+// surface `page_address`, `page_size` and `write_protected` in the
+// metadata content; this fixture pins both that the arm fires AND that
+// the address details survive end-to-end through ct-print --full.
+//
+// The fixture grows the heap by one page via `sbrk`, writes a sentinel
+// into the new page (proving the heap grew), then attempts a load from
+// an unmapped high address (well past the mapped heap region).  PolkaVM
+// surfaces this as `InterruptKind::Segfault`.
+fn sbrk_out_of_bounds_program() -> Vec<Instruction> {
+    vec![
+        // -- 0 -- Request a 1-page heap grow: load size into A1
+        asm::load_imm(A1, 0x1000),
+        // -- 1 -- sbrk: A0 = sbrk A1.  A0 receives the new heap pointer
+        //          (or 0 on failure).
+        asm::sbrk(A0, A1),
+        // -- 2 -- Sentinel: write 0xAB into the freshly-mapped page so
+        //          the trace shows the heap grow succeeded before the
+        //          out-of-bounds access.
+        asm::load_imm(A2, 0xAB),
+        // -- 3 -- store_indirect_u8(A2, A0, 0)
+        asm::store_indirect_u8(A2, A0, 0),
+        // -- 4 -- Out-of-bounds load: read past the mapped heap region.
+        //          0x4000_0000 sits well above any mapped segment in
+        //          the default RW/RO/stack/heap layout, so the load
+        //          triggers a guest pagefault → InterruptKind::Segfault.
+        asm::load_u8(A3, 0x4000_0000),
+        // Dead code beyond the segfault — must NOT surface in the trace.
+        asm::load_imm(A0, 999),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_sbrk_out_of_bounds_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_sbrk_out_of_bounds_via_ct_print_full",
+        "sbrk_out_of_bounds_test",
+        &sbrk_out_of_bounds_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; the segfault \
+         termination is not a call boundary; counts={counts}"
+    );
+    // The segfault must surface as exactly one io_event (Error → ioError).
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "expected exactly 1 io_event (the polkavm_segfault error); counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "io")
+        .collect();
+    assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
+    assert_eq!(
+        io_events[0]["io_kind"].as_str(),
+        Some("ioError"),
+        "segfault io event should carry io_kind=ioError; got {}",
+        io_events[0]
+    );
+    let text = io_events[0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.starts_with("step="),
+        "segfault io event content should start with `step=`; got {text:?}"
+    );
+    // The Trap-arm-with-memory-access path emits the canonical
+    // segfault metadata schema: op=, page_address=, page_size=,
+    // write_protected=.  The op for our fixture is `load_u8`, the
+    // address is the literal absolute load target 0x4000_0000, and
+    // the access size is 1 byte.  write_protected is always false
+    // for this synthesised path (we cannot detect that without
+    // dynamic paging).
+    assert!(
+        text.contains("op=load_u8"),
+        "segfault io event content should identify the load_u8 op; got {text:?}"
+    );
+    assert!(
+        text.contains("page_address=0x40000000"),
+        "segfault io event content should carry the literal target address \
+         page_address=0x40000000; got {text:?}"
+    );
+    assert!(
+        text.contains("page_size=1"),
+        "segfault io event content should carry the access size page_size=1; \
+         got {text:?}"
+    );
+    assert!(
+        text.contains("write_protected=false"),
+        "segfault io event content should carry write_protected=false; got {text:?}"
+    );
+
+    // A0 must surface a non-zero value at some step (the freshly-allocated
+    // heap pointer returned by sbrk).  If sbrk failed, A0 would stay at 0.
+    let a0 = values_for(&doc, "arg0");
+    assert!(
+        a0.iter().any(|&v| v != 0 && v != 999),
+        "A0 should carry the sbrk result (non-zero, non-sentinel); got {a0:?}"
+    );
+
+    // A1 must surface the sbrk size 0x1000.
+    let a1 = values_for(&doc, "arg1");
+    assert!(
+        a1.contains(&0x1000),
+        "A1 should snapshot the sbrk size 0x1000; got {a1:?}"
+    );
+
+    // A2 must surface the sentinel 0xAB (proves the in-page write was
+    // staged before the segfault).
+    let a2 = values_for(&doc, "arg2");
+    assert!(
+        a2.contains(&0xAB),
+        "A2 should snapshot the in-page sentinel 0xAB; got {a2:?}"
+    );
+
+    // The dead code after the segfault (load A0 = 999) MUST NOT surface.
+    assert!(
+        !a0.contains(&999),
+        "dead code after segfault must NOT surface; A0 saw {a0:?} — \
+         the recorder is stepping past a segfault"
+    );
+
+    // Strict call/return balance: the entry-point Call(main) must have
+    // exactly one matching Return.  ct-print --full surfaces the return
+    // as `kind=call_exit`.
+    let call_exits: usize = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .count();
+    let call_entries: usize = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .count();
+    assert_eq!(
+        call_entries, 1,
+        "expected exactly 1 call_entry (the entry-point Call); got {call_entries}"
+    );
+    assert_eq!(
+        call_exits, 1,
+        "expected exactly 1 call_exit balancing the entry-point Call; \
+         the segfault arm must emit register_return; got {call_exits}"
+    );
+}
+
+// ===========================================================================
+// pallet_revive_transfer_test — value-transfer host call (`seal_transfer`)
+// ===========================================================================
+//
+// `seal_transfer` is the pallet-revive host function for moving native
+// balance between contracts and accounts.  Pre-M12 the recorder mapped
+// the ecalli index 10 to the canonical name `seal_transfer` in
+// `src/host_functions.rs`, but no fixture exercised the end-to-end path
+// — so a regression that dropped the mapping (or that surfaced the raw
+// ecalli index instead of the canonical name) would have gone unnoticed.
+//
+// The fixture stages the canonical seal_transfer argument vector
+// (A0=destination_ptr, A1=destination_len, A2=amount_ptr, A3=amount_len)
+// then issues the ecalli.  It pins:
+//
+//   1. The canonical name `seal_transfer` (NOT `ecalli_10`) surfaces in
+//      both the functions table AND the call sequence.
+//   2. The A0..A3 register snapshots at the call boundary carry the
+//      exact destination/amount pointers via the synthetic `args`
+//      Sequence.
+//   3. seal_transfer is intentionally NOT routed onto a special-event
+//      stream (it has no observable side effect of its own beyond the
+//      Call/Return record), so the trace must contain zero io_events.
+fn pallet_revive_transfer_program() -> Vec<Instruction> {
+    vec![
+        // seal_transfer(dest_ptr=0x1000, dest_len=32, amount_ptr=0x1100, amount_len=16)
+        asm::load_imm(A0, 0x1000),
+        asm::load_imm(A1, 32),
+        asm::load_imm(A2, 0x1100),
+        asm::load_imm(A3, 16),
+        asm::ecalli(10), // seal_transfer
+        // Sentinel: post-transfer register snapshot.
+        asm::load_imm(A0, 0xABCD),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_pallet_revive_transfer_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_pallet_revive_transfer_via_ct_print_full",
+        "pallet_revive_transfer_test",
+        &pallet_revive_transfer_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // Functions table must contain main + seal_transfer in source order.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for f in &["main", "seal_transfer"] {
+        assert!(
+            functions.iter().any(|fname| fname == f),
+            "expected `{f}` in functions table; got {:?}",
+            functions
+        );
+    }
+    // The raw ecalli-index name `ecalli_10` MUST NOT surface — the
+    // host_functions resolver must have mapped index 10 to `seal_transfer`.
+    assert!(
+        !functions.iter().any(|fname| *fname == "ecalli_10"),
+        "raw `ecalli_10` must NOT appear in the functions table; the \
+         host_functions resolver must canonicalise it to `seal_transfer`; \
+         got {:?}",
+        functions
+    );
+
+    // Call sequence: entry-point Call(main) + Call(seal_transfer).
+    let call_sequence = observed_call_sequence(&doc);
+    assert_eq!(
+        call_sequence,
+        vec!["main".to_string(), "seal_transfer".to_string()],
+        "call_entry events must appear in entry-point + ecalli order with \
+         the canonical pallet-revive name"
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(2),
+        "expected exactly 2 call events (1 entry-point + 1 ecalli); counts={counts}"
+    );
+    // seal_transfer is intentionally NOT routed onto a special-event
+    // stream by the recorder's `match index { 4 | 5 | 6 | 9 | 28 => ... }`
+    // arm.  Pin that the io_event count stays at zero so a future
+    // regression that adds an unintended routing surfaces.
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "seal_transfer must not emit any io_events (no special-event \
+         routing in the current recorder); counts={counts}"
+    );
+
+    // Strict per-step args Sequence check: there must exist a step
+    // whose Sequence snapshots EXACTLY the seal_transfer argument
+    // vector [dest_ptr, dest_len, amount_ptr, amount_len, 0, 0].
+    // This is the load-bearing pin that the A0..A3 registers carry
+    // the canonical destination/amount values at the call boundary.
+    let args_seqs = observed_args_sequence_vars(&doc);
+    let expected_transfer: [i64; 6] = [0x1000, 32, 0x1100, 16, 0, 0];
+    assert!(
+        args_seqs.contains(&expected_transfer),
+        "expected args Sequence {expected_transfer:?} (seal_transfer args) \
+         at some step; got {args_seqs:?}"
+    );
+
+    // The post-transfer sentinel 0xABCD must surface in A0 — proves
+    // execution continued past the ecalli (host_handler returned true
+    // for known seal_transfer index 10).
+    let a0 = values_for(&doc, "arg0");
+    assert!(
+        a0.contains(&0xABCD),
+        "A0 should snapshot the post-transfer sentinel 0xABCD; got {a0:?}"
+    );
+
+    // Pre-transfer destination pointer (0x1000) and amount pointer
+    // (0x1100) must surface in A0 / A2 respectively.
+    let a2 = values_for(&doc, "arg2");
+    assert!(
+        a0.contains(&0x1000),
+        "A0 should snapshot the destination pointer 0x1000; got {a0:?}"
+    );
+    assert!(
+        a2.contains(&0x1100),
+        "A2 should snapshot the amount pointer 0x1100; got {a2:?}"
+    );
+}
