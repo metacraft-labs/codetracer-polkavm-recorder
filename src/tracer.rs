@@ -10,7 +10,9 @@ use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueReco
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
-use polkavm::{Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
+use polkavm::{
+    Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg,
+};
 use polkavm_common::program::Instruction;
 
 /// Name of the environment variable that opts the recorder into gas
@@ -47,7 +49,6 @@ thread_local! {
 pub fn set_thread_local_gas_limit(limit: Option<i64>) {
     THREAD_GAS_LIMIT.with(|cell| cell.set(limit));
 }
-
 
 // The recorder is CTFS-only per `Recorder-CLI-Conventions.md` §4 (see
 // `codetracer-specs`).  We pin every `create_trace_writer` call site to
@@ -146,9 +147,11 @@ impl PolkaVmTracer {
         // the `NotEnoughGas` termination arm of `run_step_loop`.
         // Pre-fix the arm was dead code because the recorder always
         // ran without metering.
-        let gas_limit: Option<i64> = THREAD_GAS_LIMIT
-            .with(|cell| cell.get())
-            .or_else(|| std::env::var(GAS_LIMIT_ENV).ok().and_then(|s| s.parse().ok()));
+        let gas_limit: Option<i64> = THREAD_GAS_LIMIT.with(|cell| cell.get()).or_else(|| {
+            std::env::var(GAS_LIMIT_ENV)
+                .ok()
+                .and_then(|s| s.parse().ok())
+        });
         if gas_limit.is_some() {
             module_config.set_gas_metering(Some(GasMeteringKind::Sync));
         }
@@ -242,12 +245,8 @@ impl PolkaVmTracer {
                     "main".to_string()
                 }
             });
-        let entry_fn_id = TraceWriter::ensure_function_id(
-            &mut *tracer.writer,
-            &entry_name,
-            blob_path,
-            Line(1),
-        );
+        let entry_fn_id =
+            TraceWriter::ensure_function_id(&mut *tracer.writer, &entry_name, blob_path, Line(1));
         TraceWriter::register_call(&mut *tracer.writer, entry_fn_id, vec![]);
 
         // -- 8. Instantiate and run with step tracing ------------------------------------
@@ -371,11 +370,7 @@ impl PolkaVmTracer {
                                     blob_path,
                                     Line(0),
                                 );
-                                TraceWriter::register_call(
-                                    &mut *self.writer,
-                                    callee_fn_id,
-                                    vec![],
-                                );
+                                TraceWriter::register_call(&mut *self.writer, callee_fn_id, vec![]);
                             }
                             Instruction::jump_indirect(base, _offset) => {
                                 // Treat `jump_indirect(RA, _)` as a return.
@@ -383,10 +378,7 @@ impl PolkaVmTracer {
                                 // jump-table dispatch) are not call/return
                                 // boundaries and are left as plain steps.
                                 if base.get() == Reg::RA {
-                                    TraceWriter::register_return(
-                                        &mut *self.writer,
-                                        NONE_VALUE,
-                                    );
+                                    TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                                 }
                             }
 
@@ -446,52 +438,180 @@ impl PolkaVmTracer {
                             // Execution continues — PolkaVM handles the
                             // unaligned access transparently.
                             Instruction::load_u16(_d, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_u16", None, imm, 2);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_u16",
+                                    None,
+                                    imm,
+                                    2,
+                                );
                             }
                             Instruction::load_i16(_d, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_i16", None, imm, 2);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_i16",
+                                    None,
+                                    imm,
+                                    2,
+                                );
                             }
                             Instruction::load_u32(_d, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_u32", None, imm, 4);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_u32",
+                                    None,
+                                    imm,
+                                    4,
+                                );
                             }
                             Instruction::load_i32(_d, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_i32", None, imm, 4);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_i32",
+                                    None,
+                                    imm,
+                                    4,
+                                );
                             }
                             Instruction::load_u64(_d, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_u64", None, imm, 8);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_u64",
+                                    None,
+                                    imm,
+                                    8,
+                                );
                             }
                             Instruction::store_u16(_s, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "store_u16", None, imm, 2);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "store_u16",
+                                    None,
+                                    imm,
+                                    2,
+                                );
                             }
                             Instruction::store_u32(_s, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "store_u32", None, imm, 4);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "store_u32",
+                                    None,
+                                    imm,
+                                    4,
+                                );
                             }
                             Instruction::store_u64(_s, imm) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "store_u64", None, imm, 8);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "store_u64",
+                                    None,
+                                    imm,
+                                    8,
+                                );
                             }
                             Instruction::load_indirect_u16(_d, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_u16", Some(base.get()), offset, 2);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_indirect_u16",
+                                    Some(base.get()),
+                                    offset,
+                                    2,
+                                );
                             }
                             Instruction::load_indirect_i16(_d, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_i16", Some(base.get()), offset, 2);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_indirect_i16",
+                                    Some(base.get()),
+                                    offset,
+                                    2,
+                                );
                             }
                             Instruction::load_indirect_u32(_d, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_u32", Some(base.get()), offset, 4);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_indirect_u32",
+                                    Some(base.get()),
+                                    offset,
+                                    4,
+                                );
                             }
                             Instruction::load_indirect_i32(_d, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_i32", Some(base.get()), offset, 4);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_indirect_i32",
+                                    Some(base.get()),
+                                    offset,
+                                    4,
+                                );
                             }
                             Instruction::load_indirect_u64(_d, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "load_indirect_u64", Some(base.get()), offset, 8);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "load_indirect_u64",
+                                    Some(base.get()),
+                                    offset,
+                                    8,
+                                );
                             }
                             Instruction::store_indirect_u16(_s, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "store_indirect_u16", Some(base.get()), offset, 2);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "store_indirect_u16",
+                                    Some(base.get()),
+                                    offset,
+                                    2,
+                                );
                             }
                             Instruction::store_indirect_u32(_s, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "store_indirect_u32", Some(base.get()), offset, 4);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "store_indirect_u32",
+                                    Some(base.get()),
+                                    offset,
+                                    4,
+                                );
                             }
                             Instruction::store_indirect_u64(_s, base, offset) => {
-                                detect_misalign(&mut *self.writer, instance, step_count, "store_indirect_u64", Some(base.get()), offset, 8);
+                                detect_misalign(
+                                    &mut *self.writer,
+                                    instance,
+                                    step_count,
+                                    "store_indirect_u64",
+                                    Some(base.get()),
+                                    offset,
+                                    8,
+                                );
                             }
                             _ => {}
                         }
@@ -887,9 +1007,7 @@ fn detect_misalign(
             writer,
             EventLogKind::Error,
             "polkavm_misaligned_access",
-            &format!(
-                "step={step_count} op={op_name} addr={effective_addr:#x} size={access_size}"
-            ),
+            &format!("step={step_count} op={op_name} addr={effective_addr:#x} size={access_size}"),
         );
     }
 }
@@ -929,9 +1047,15 @@ fn describe_memory_access(
         Instruction::load_indirect_i32(_, base, off) => indirect("load_indirect_i32", base, off, 4),
         Instruction::load_indirect_u64(_, base, off) => indirect("load_indirect_u64", base, off, 8),
         Instruction::store_indirect_u8(_, base, off) => indirect("store_indirect_u8", base, off, 1),
-        Instruction::store_indirect_u16(_, base, off) => indirect("store_indirect_u16", base, off, 2),
-        Instruction::store_indirect_u32(_, base, off) => indirect("store_indirect_u32", base, off, 4),
-        Instruction::store_indirect_u64(_, base, off) => indirect("store_indirect_u64", base, off, 8),
+        Instruction::store_indirect_u16(_, base, off) => {
+            indirect("store_indirect_u16", base, off, 2)
+        }
+        Instruction::store_indirect_u32(_, base, off) => {
+            indirect("store_indirect_u32", base, off, 4)
+        }
+        Instruction::store_indirect_u64(_, base, off) => {
+            indirect("store_indirect_u64", base, off, 8)
+        }
         _ => None,
     }
 }

@@ -67,10 +67,13 @@ fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
     Some(p)
 }
 
-/// Build a PolkaVM program blob from a list of instructions, with a
-/// single `main` export at basic block 0 and a small RW data area.
-fn build_blob(code: &[Instruction]) -> Vec<u8> {
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+/// Build a PolkaVM program blob from a list of instructions for the
+/// given ISA, with a single `main` export at basic block 0 and a small
+/// RW data area.  `Latest32` is the recorder's production target;
+/// `Latest64` is needed for fixtures that exercise 64-bit-only opcodes
+/// (`add_64`, `mul_64`, `add_imm_64`, etc.).
+fn build_blob_with_isa(code: &[Instruction], isa: InstructionSetKind) -> Vec<u8> {
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.set_stack_size(4096);
     // Provide a small RW segment so memory tests can store/load
     // without segfaulting.  64 bytes is plenty for the patterns
@@ -90,11 +93,24 @@ fn record_and_dump_full(
     blob_basename: &str,
     code: &[Instruction],
 ) -> Option<(serde_json::Value, PathBuf)> {
+    record_and_dump_full_with_isa(test_name, blob_basename, code, InstructionSetKind::Latest32)
+}
+
+/// Variant of `record_and_dump_full` that lets the test request a
+/// non-default ISA for the program blob.  `Latest32` is the recorder's
+/// production target; `Latest64` is needed for fixtures that exercise
+/// 64-bit-only opcodes (`add_64`, `mul_64`, `add_imm_64`, etc.).
+fn record_and_dump_full_with_isa(
+    test_name: &str,
+    blob_basename: &str,
+    code: &[Instruction],
+    isa: InstructionSetKind,
+) -> Option<(serde_json::Value, PathBuf)> {
     let ct_print = ct_print_or_skip(test_name)?;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let blob_path = tmp.path().join(format!("{blob_basename}.polkavm"));
-    std::fs::write(&blob_path, build_blob(code)).expect("write blob");
+    std::fs::write(&blob_path, build_blob_with_isa(code, isa)).expect("write blob");
 
     let out_dir = tmp.path().join("traces");
     std::fs::create_dir_all(&out_dir).unwrap();
@@ -465,7 +481,10 @@ fn test_loop_via_ct_print_full() {
     // depends on how the PolkaVM source mapper assigns lines to
     // bytecode offsets.  Pin exactly to whatever the recorder emits
     // today and refuse to silently accept drift.
-    assert!(steps >= 5, "expected loop to produce >=5 step events; got {steps}");
+    assert!(
+        steps >= 5,
+        "expected loop to produce >=5 step events; got {steps}"
+    );
     assert!(
         steps <= 30,
         "expected loop step count <= 30 for a 4-iteration loop; got {steps} \
@@ -882,10 +901,8 @@ fn test_trap_via_ct_print_full() {
     // (per codetracer_ct_print_lib.nim §3 of the events loop), with
     // the metadata string surfaced through `text`/`bytes_b64`.
     let events = doc["events"].as_array().expect("events array");
-    let trap_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let trap_events: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(
         trap_events.len(),
         1,
@@ -930,8 +947,16 @@ fn test_trap_via_ct_print_full() {
     // Pre-trap values 42 and 7 MUST surface (the recorder snapshots
     // before signalling the trap).
     let a1 = values_for(&doc, "arg1");
-    assert!(a0.contains(&42), "arg0 should carry pre-trap 42; got {:?}", a0);
-    assert!(a1.contains(&7), "arg1 should carry pre-trap 7; got {:?}", a1);
+    assert!(
+        a0.contains(&42),
+        "arg0 should carry pre-trap 42; got {:?}",
+        a0
+    );
+    assert!(
+        a1.contains(&7),
+        "arg1 should carry pre-trap 7; got {:?}",
+        a1
+    );
 }
 
 // ===========================================================================
@@ -1039,10 +1064,7 @@ fn test_host_calls_via_ct_print_full() {
     // as `{kind: "io", io_kind: ...}` — per codetracer_ct_print_lib.nim
     // §3 of the events loop.
     let events = doc["events"].as_array().expect("events array");
-    let io_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 3, "expected exactly 3 io event entries");
     // The multi-stream writer collapses the 14-variant EventLogKind
     // into the 4-variant IOEventKind palette (see toIOEventKind in
@@ -1368,10 +1390,7 @@ fn test_not_enough_gas_via_ct_print_full() {
     // The out-of-gas error must surface as a single io event of kind
     // Error → collapsed to ioError by toIOEventKind.
     let events = doc["events"].as_array().expect("events array");
-    let io_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
@@ -1459,10 +1478,7 @@ fn test_divide_by_zero_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    let io_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
@@ -1484,7 +1500,10 @@ fn test_divide_by_zero_via_ct_print_full() {
     let a1 = values_for(&doc, "arg1");
     let a2 = values_for(&doc, "arg2");
     assert!(a0.contains(&10), "arg0 should snapshot 10; got {a0:?}");
-    assert!(a1.contains(&0), "arg1 should snapshot 0 (the zero divisor); got {a1:?}");
+    assert!(
+        a1.contains(&0),
+        "arg1 should snapshot 0 (the zero divisor); got {a1:?}"
+    );
     // After the div executes, A2 holds the RISC-V sentinel
     // `u32::MAX` for divu-by-zero.  ct-print surfaces the register
     // as a signed i64; `u32::MAX as i64` = 4294967295.
@@ -1558,10 +1577,7 @@ fn test_misaligned_access_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    let io_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
@@ -1659,8 +1675,7 @@ fn test_stack_frame_via_ct_print_full() {
     // initial stack-top value (call it SP_high) and SP_high - 16
     // during the framed body.
     let sp_values = values_for(&doc, "SP");
-    let unique_sps: std::collections::BTreeSet<i64> =
-        sp_values.iter().copied().collect();
+    let unique_sps: std::collections::BTreeSet<i64> = sp_values.iter().copied().collect();
     assert_eq!(
         unique_sps.len(),
         2,
@@ -1690,8 +1705,14 @@ fn test_stack_frame_via_ct_print_full() {
     // post-spill value (0xCAFE): the recorder must NOT collapse
     // consecutive register-set events onto the same step entry.
     let a0 = values_for(&doc, "arg0");
-    assert!(a0.contains(&0x1234), "arg0 should snapshot 0x1234; got {a0:?}");
-    assert!(a0.contains(&0xCAFE), "arg0 should snapshot 0xCAFE; got {a0:?}");
+    assert!(
+        a0.contains(&0x1234),
+        "arg0 should snapshot 0x1234; got {a0:?}"
+    );
+    assert!(
+        a0.contains(&0xCAFE),
+        "arg0 should snapshot 0xCAFE; got {a0:?}"
+    );
 }
 
 // ===========================================================================
@@ -1795,10 +1816,7 @@ fn test_pallet_revive_storage_via_ct_print_full() {
 
     // Inspect the io stream in source order.
     let events = doc["events"].as_array().expect("events array");
-    let io_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 2, "expected exactly 2 io event entries");
     for (idx, io) in io_events.iter().enumerate() {
         assert_eq!(
@@ -2623,10 +2641,7 @@ fn test_sbrk_out_of_bounds_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    let io_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
@@ -2698,14 +2713,8 @@ fn test_sbrk_out_of_bounds_via_ct_print_full() {
     // Strict call/return balance: the entry-point Call(main) must have
     // exactly one matching Return.  ct-print --full surfaces the return
     // as `kind=call_exit`.
-    let call_exits: usize = events
-        .iter()
-        .filter(|e| e["kind"] == "call_exit")
-        .count();
-    let call_entries: usize = events
-        .iter()
-        .filter(|e| e["kind"] == "call_entry")
-        .count();
+    let call_exits: usize = events.iter().filter(|e| e["kind"] == "call_exit").count();
+    let call_entries: usize = events.iter().filter(|e| e["kind"] == "call_entry").count();
     assert_eq!(
         call_entries, 1,
         "expected exactly 1 call_entry (the entry-point Call); got {call_entries}"
@@ -2849,5 +2858,847 @@ fn test_pallet_revive_transfer_via_ct_print_full() {
     assert!(
         a2.contains(&0x1100),
         "A2 should snapshot the amount pointer 0x1100; got {a2:?}"
+    );
+}
+
+// ===========================================================================
+// arith_64_test — RV64 64-bit ALU surface
+// ===========================================================================
+//
+// Pre-M12 every arithmetic fixture targeted the Latest32 ISA, so the
+// 64-bit ALU instructions (`add_64`, `sub_64`, `mul_64`, `add_imm_64`,
+// `sub_imm_64`, `shift_logical_left_64`, etc.) had ZERO coverage —
+// a regression that silently truncated a 64-bit result to its low 32
+// bits would not have surfaced anywhere in the test suite.
+//
+// This fixture builds a Latest64 blob exercising the 64-bit ALU
+// surface on operands that overflow 32 bits, so a 32-bit truncation
+// would yield observably different register snapshots:
+//
+//   * add_64(A0 + A1):  0x0000_0001_FFFF_FFFE + 0x0000_0001_0000_0001
+//                     = 0x0000_0002_FFFF_FFFF
+//                     (low-32 truncation would give 0xFFFF_FFFF)
+//   * add_imm_64:       previous + 1 = 0x0000_0003_0000_0000
+//   * sub_64:           0x0000_0002_FFFF_FFFF - 0x0000_0001_0000_0001
+//                     = 0x0000_0001_FFFF_FFFE
+//   * mul_64(A2 * A3):  0x1_0000_0001 * 2 = 0x2_0000_0002
+//                     (low-32 truncation would give 2)
+//   * shift_logical_left_64 by 33:
+//                     1 << 33 = 0x2_0000_0000
+//                     (truncated 32-bit shift would yield 0; the
+//                      Latest64 ISA's `shift_logical_left_64` masks
+//                      the shift amount to 6 bits → 33 valid)
+//   * sub_imm_64:       canonicalised to negate_and_add_imm_64 by the
+//                      assembler — exercise via the explicit
+//                      negate_and_add_imm_64 builder (PolkaVM does not
+//                      expose a separate `sub_imm_64` opcode; the
+//                      compiler lowers `dst = src - imm` to
+//                      `dst = -imm + src` via the negate_and_add form).
+fn arith_64_program() -> Vec<Instruction> {
+    vec![
+        // A0 = 0x0000_0001_FFFF_FFFE
+        asm::load_imm64(A0, 0x0000_0001_FFFF_FFFE),
+        // A1 = 0x0000_0001_0000_0001
+        asm::load_imm64(A1, 0x0000_0001_0000_0001),
+        // S0 = A0 + A1 (64-bit) = 0x0000_0002_FFFF_FFFF
+        asm::add_64(S0, A0, A1),
+        // S1 = S0 + 1 (64-bit imm) = 0x0000_0003_0000_0000
+        asm::add_imm_64(S1, S0, 1),
+        // T0 = S0 - A1 (64-bit) = 0x0000_0001_FFFF_FFFE  (== A0)
+        asm::sub_64(T0, S0, A1),
+        // A2 = 0x1_0000_0001
+        asm::load_imm64(A2, 0x0000_0001_0000_0001),
+        // A3 = 2
+        asm::load_imm(A3, 2),
+        // T1 = A2 * A3 (64-bit) = 0x2_0000_0002
+        asm::mul_64(T1, A2, A3),
+        // A4 = 1
+        asm::load_imm(A4, 1),
+        // T2 = A4 << 33 (64-bit) = 0x2_0000_0000
+        asm::shift_logical_left_imm_64(T2, A4, 33),
+        // negate_and_add_imm_64(dst, src, imm) := dst = -src + imm.
+        // To compute dst = src - imm == -imm + src we'd want imm-then-
+        // src semantics; PolkaVM exposes the operand order above, so
+        // pin with: negate_and_add_imm_64(A5, S1, 5) yields
+        // A5 = -S1 + 5.  S1 = 0x3_0000_0000; -S1 + 5 (mod 2^64)
+        // = 0xFFFF_FFFC_FFFF_FFFF + 6 (because -x = ~x + 1) = ...
+        // Compute precisely below in the test assertion to pin the
+        // exact 64-bit value.
+        asm::negate_and_add_imm_64(A5, S1, 5),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_arith_64_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full_with_isa(
+        "test_arith_64_test_via_ct_print_full",
+        "arith_64_test",
+        &arith_64_program(),
+        InstructionSetKind::Latest64,
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // No host calls; only the synthesised entry-point Call(main).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "arith_64_test must register only the entry-point `main`; got {:?}",
+        functions
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "arith_64_test must emit only the entry-point Call(main)"
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "arith_64_test must not emit any io_events; counts={counts}"
+    );
+
+    // Strict per-destination-register pins.  The Latest64 ISA stores
+    // every register as a true 64-bit value (no zero/sign-extension
+    // collapsing onto the upper 32 bits as in Latest32), so values
+    // larger than 2^31 surface as i64 with the high 32 bits set.
+    let a0 = values_for(&doc, "arg0");
+    let a1 = values_for(&doc, "arg1");
+    let a2 = values_for(&doc, "arg2");
+    let a3 = values_for(&doc, "arg3");
+    let a4 = values_for(&doc, "arg4");
+    let a5 = values_for(&doc, "arg5");
+    let s0 = values_for(&doc, "S0");
+    let s1 = values_for(&doc, "S1");
+    let t0 = values_for(&doc, "T0");
+    let t1 = values_for(&doc, "T1");
+    let t2 = values_for(&doc, "T2");
+
+    // A0 = 0x1_FFFF_FFFE — top bit clear (bit 63), surfaces as positive.
+    let a0_val: i64 = 0x0000_0001_FFFF_FFFE;
+    assert!(
+        a0.contains(&a0_val),
+        "A0 should snapshot 0x1_FFFF_FFFE = {a0_val}; got {a0:?}"
+    );
+    let a1_val: i64 = 0x0000_0001_0000_0001;
+    assert!(
+        a1.contains(&a1_val),
+        "A1 should snapshot 0x1_0000_0001 = {a1_val}; got {a1:?}"
+    );
+
+    // add_64: S0 = 0x2_FFFF_FFFF.  A 32-bit truncation would yield
+    // 0xFFFF_FFFF (= 4_294_967_295) — pin BOTH that the 64-bit value
+    // is present AND that the truncated value is NOT the only one
+    // surfacing for S0.
+    let s0_val: i64 = 0x0000_0002_FFFF_FFFF;
+    assert!(
+        s0.contains(&s0_val),
+        "S0 should snapshot the add_64 result 0x2_FFFF_FFFF = {s0_val}; \
+         got {s0:?}"
+    );
+    let s0_truncated: i64 = 0xFFFF_FFFF;
+    assert!(
+        !s0.iter().all(|&v| v == s0_truncated),
+        "S0 must NOT be only the truncated 32-bit form 0xFFFF_FFFF — \
+         the recorder appears to have truncated a 64-bit add result; got {s0:?}"
+    );
+
+    // add_imm_64: S1 = S0 + 1 = 0x3_0000_0000
+    let s1_val: i64 = 0x0000_0003_0000_0000;
+    assert!(
+        s1.contains(&s1_val),
+        "S1 should snapshot the add_imm_64 result 0x3_0000_0000 = {s1_val}; \
+         got {s1:?}"
+    );
+
+    // sub_64: T0 = S0 - A1 = 0x1_FFFF_FFFE
+    let t0_val: i64 = 0x0000_0001_FFFF_FFFE;
+    assert!(
+        t0.contains(&t0_val),
+        "T0 should snapshot the sub_64 result 0x1_FFFF_FFFE = {t0_val}; \
+         got {t0:?}"
+    );
+
+    // A2 = 0x1_0000_0001, A3 = 2
+    let a2_val: i64 = 0x0000_0001_0000_0001;
+    assert!(
+        a2.contains(&a2_val),
+        "A2 should snapshot 0x1_0000_0001; got {a2:?}"
+    );
+    assert!(a3.contains(&2), "A3 should snapshot 2; got {a3:?}");
+
+    // mul_64: T1 = 0x1_0000_0001 * 2 = 0x2_0000_0002.  A 32-bit
+    // truncation would yield 2 — pin that the high 32 bits survive.
+    let t1_val: i64 = 0x0000_0002_0000_0002;
+    assert!(
+        t1.contains(&t1_val),
+        "T1 should snapshot the mul_64 result 0x2_0000_0002 = {t1_val} \
+         (NOT the 32-bit truncation 2); got {t1:?}"
+    );
+
+    // A4 = 1, T2 = A4 << 33 = 0x2_0000_0000.  A 32-bit shift on the
+    // Latest32 ISA would mask 33 to 1 (low-5-bits only) and yield 2;
+    // the 64-bit shift masks to 6 bits → 33 is the actual amount.
+    assert!(a4.contains(&1), "A4 should snapshot 1; got {a4:?}");
+    let t2_val: i64 = 0x0000_0002_0000_0000;
+    assert!(
+        t2.contains(&t2_val),
+        "T2 should snapshot the shift_logical_left_imm_64(1, 33) = \
+         0x2_0000_0000 = {t2_val} (NOT the 32-bit-masked result 2); got {t2:?}"
+    );
+
+    // negate_and_add_imm_64(A5, S1, 5) := A5 = -S1 + 5  (mod 2^64).
+    // S1 = 0x3_0000_0000, so -S1 = 0xFFFF_FFFC_FFFF_FFFF + 1
+    //                            = 0xFFFF_FFFD_0000_0000
+    // -S1 + 5 = 0xFFFF_FFFD_0000_0005
+    let a5_val: i64 = 0xFFFF_FFFD_0000_0005u64 as i64;
+    assert!(
+        a5.contains(&a5_val),
+        "A5 should snapshot negate_and_add_imm_64(S1=0x3_0000_0000, 5) = \
+         0xFFFF_FFFD_0000_0005 = {a5_val}; got {a5:?}"
+    );
+}
+
+// ===========================================================================
+// ext_test — sign / zero extension instruction surface
+// ===========================================================================
+//
+// Pre-M12 the recorder coverage included no fixture exercising the
+// `sign_extend_*` / `zero_extend_*` instruction surface: a regression
+// that swapped sign-extension for zero-extension (or vice versa) on
+// any width would have gone unnoticed.
+//
+// PolkaVM's Latest32 ISA exposes:
+//   * `sign_extend_8`  — sign-extend the low byte of src to a full
+//                        register: 0x80 -> 0xFFFF_FF80
+//   * `sign_extend_16` — sign-extend the low halfword: 0xFFFF -> 0xFFFF_FFFF
+//   * `zero_extend_16` — zero-extend the low halfword: 0xFFFF -> 0x0000_FFFF
+//
+// (Latest32 has NO `zero_extend_8`, `sign_extend_32` or `zero_extend_32`
+// — the 8-bit zero-extension is identical to `and 0xFF`, and the
+// 32-to-64 extensions are Latest64-only because Latest32 registers are
+// 32-bit-wide.  We pin the surface PolkaVM actually supports for the
+// recorder's chosen ISA; fixtures for `sign_extend_32`/`zero_extend_32`
+// would require a Latest64 blob and a recorder ISA change.)
+//
+// Inputs are picked so signed and unsigned interpretations DIFFER:
+//   * 0x80   — top bit of byte set
+//   * 0xFFFF — top bit of halfword set
+//
+// Each result lands in a distinct register so per-step snapshots
+// expose every value.
+fn ext_program() -> Vec<Instruction> {
+    vec![
+        // A0 = 0x80 (high bit of byte set)
+        asm::load_imm(A0, 0x80),
+        // S0 = sign_extend_8(A0) = 0xFFFF_FF80
+        asm::sign_extend_8(S0, A0),
+        // A1 = 0xFFFF (high bit of halfword set)
+        asm::load_imm(A1, 0xFFFF),
+        // S1 = sign_extend_16(A1) = 0xFFFF_FFFF
+        asm::sign_extend_16(S1, A1),
+        // T0 = zero_extend_16(A1) = 0x0000_FFFF
+        asm::zero_extend_16(T0, A1),
+        // A2 = 0x7F (low byte, high bit clear) — pin that the
+        //          sign_extend_8 op leaves the high bits clear when
+        //          the input's bit 7 is 0
+        asm::load_imm(A2, 0x7F),
+        // T1 = sign_extend_8(A2) = 0x0000_007F
+        asm::sign_extend_8(T1, A2),
+        // T2 = sign_extend_16(A2) = 0x0000_007F (still positive halfword)
+        asm::sign_extend_16(T2, A2),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_ext_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_ext_test_via_ct_print_full",
+        "ext_test",
+        &ext_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "ext_test must register only the entry-point `main`; got {:?}",
+        functions
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "ext_test must emit only the entry-point Call(main)"
+    );
+
+    let counts = &doc["counts"];
+    // 9 instructions execute (load A0, sext_8 S0, load A1, sext_16 S1,
+    // zext_16 T0, load A2, sext_8 T1, sext_16 T2, ret), each on its
+    // own line, plus the synthetic initial entry step → 10 step events.
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(10),
+        "expected 10 step events (initial entry + 9 instr lines); counts={counts}"
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "ext_test must not emit any io_events; counts={counts}"
+    );
+
+    // Per-step register snapshots.  In the Latest32 ISA, the 32-bit
+    // ALU result is stored in the low 32 bits of the 64-bit register
+    // slot WITHOUT sign-extending the upper 32 bits, so a sign-extended
+    // 32-bit value with the top bit set surfaces as the unsigned u32
+    // interpretation cast to i64 (i.e. zero-extended into the upper 32
+    // bits of the i64).
+    let a0 = values_for(&doc, "arg0");
+    let a1 = values_for(&doc, "arg1");
+    let a2 = values_for(&doc, "arg2");
+    let s0 = values_for(&doc, "S0");
+    let s1 = values_for(&doc, "S1");
+    let t0 = values_for(&doc, "T0");
+    let t1 = values_for(&doc, "T1");
+    let t2 = values_for(&doc, "T2");
+
+    assert!(a0.contains(&0x80), "A0 should snapshot 0x80; got {a0:?}");
+    assert!(
+        a1.contains(&0xFFFF),
+        "A1 should snapshot 0xFFFF; got {a1:?}"
+    );
+    assert!(a2.contains(&0x7F), "A2 should snapshot 0x7F; got {a2:?}");
+
+    // sign_extend_8(0x80) → as i32 = -128 (0xFFFF_FF80).  Surfaced
+    // as zero-ext-u32 = 0xFFFF_FF80.
+    let sext8_neg: i64 = 0xFFFF_FF80;
+    assert!(
+        s0.contains(&sext8_neg),
+        "S0 should snapshot sign_extend_8(0x80) = 0xFFFF_FF80 = {sext8_neg}; \
+         got {s0:?}"
+    );
+
+    // sign_extend_16(0xFFFF) → as i32 = -1 (0xFFFF_FFFF).  Surfaced
+    // as zero-ext-u32 = 0xFFFF_FFFF.  This DIFFERS from
+    // zero_extend_16(0xFFFF) = 0xFFFF — pin both to demonstrate the
+    // signed/unsigned divergence is preserved end-to-end.
+    let sext16_neg: i64 = 0xFFFF_FFFF;
+    assert!(
+        s1.contains(&sext16_neg),
+        "S1 should snapshot sign_extend_16(0xFFFF) = 0xFFFF_FFFF = {sext16_neg}; \
+         got {s1:?}"
+    );
+    assert!(
+        t0.contains(&0xFFFF),
+        "T0 should snapshot zero_extend_16(0xFFFF) = 0xFFFF (DIFFERENT \
+         from the sign-extended value 0xFFFF_FFFF); got {t0:?}"
+    );
+
+    // sign_extend_8(0x7F) and sign_extend_16(0x7F) — both leave the
+    // upper bits clear because bit 7 / bit 15 are 0.
+    assert!(
+        t1.contains(&0x7F),
+        "T1 should snapshot sign_extend_8(0x7F) = 0x7F (high-bit-clear); got {t1:?}"
+    );
+    assert!(
+        t2.contains(&0x7F),
+        "T2 should snapshot sign_extend_16(0x7F) = 0x7F (high-bit-clear); got {t2:?}"
+    );
+}
+
+// ===========================================================================
+// set_less_than_test — compare-and-set instruction surface
+// ===========================================================================
+//
+// Pre-M12 the recorder had no fixture for the `set_less_than_*` family.
+// These instructions implement RISC-V's `slt` / `sltu` / `slti` /
+// `sltiu`: they write 1 to the destination if `s1 < s2` (under the
+// chosen signed/unsigned interpretation) and 0 otherwise.
+//
+// The fixture picks operands where signed and unsigned comparisons
+// DISAGREE so that a regression swapping `signed` for `unsigned`
+// (or vice versa) surfaces as a different 0/1 result:
+//
+//   * A0 = 0xFFFF_FFFF — interpreted signed = -1, unsigned = 4_294_967_295
+//   * A1 = 1
+//
+//   set_less_than_signed   (A0, A1) -> 1   (-1 < 1)
+//   set_less_than_unsigned (A0, A1) -> 0   (4G > 1)
+//   set_less_than_signed   (A1, A0) -> 0   (1 > -1)
+//   set_less_than_unsigned (A1, A0) -> 1   (1 < 4G)
+//
+// The `_imm` variants exercise the same flip with an immediate operand
+// (the immediate is sign-extended for the `_signed_imm` form, zero-
+// extended for the `_unsigned_imm` form).
+fn set_less_than_program() -> Vec<Instruction> {
+    vec![
+        // A0 = 0xFFFF_FFFF, A1 = 1
+        asm::load_imm(A0, 0xFFFF_FFFF),
+        asm::load_imm(A1, 1),
+        // S0 = (A0 < A1) signed       -> 1
+        asm::set_less_than_signed(S0, A0, A1),
+        // S1 = (A0 < A1) unsigned     -> 0
+        asm::set_less_than_unsigned(S1, A0, A1),
+        // T0 = (A1 < A0) signed       -> 0
+        asm::set_less_than_signed(T0, A1, A0),
+        // T1 = (A1 < A0) unsigned     -> 1
+        asm::set_less_than_unsigned(T1, A1, A0),
+        // T2 = (A0 < 1) signed_imm    -> 1   (-1 < 1)
+        asm::set_less_than_signed_imm(T2, A0, 1),
+        // A2 = (A0 < 1) unsigned_imm  -> 0   (4G > 1)
+        asm::set_less_than_unsigned_imm(A2, A0, 1),
+        // A3 = (A1 < 0xFFFF_FFFF) signed_imm
+        //                              -> 0   (1 > -1; imm is sign-extended)
+        asm::set_less_than_signed_imm(A3, A1, 0xFFFF_FFFF),
+        // A4 = (A1 < 0xFFFF_FFFF) unsigned_imm
+        //                              -> 1   (1 < 4G)
+        asm::set_less_than_unsigned_imm(A4, A1, 0xFFFF_FFFF),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_set_less_than_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_set_less_than_test_via_ct_print_full",
+        "set_less_than_test",
+        &set_less_than_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "set_less_than_test must register only the entry-point `main`; got {:?}",
+        functions
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "set_less_than_test must emit only the entry-point Call(main)"
+    );
+
+    let counts = &doc["counts"];
+    // 11 instructions execute (2 loads + 8 set_less_than ops + ret),
+    // each on its own line, plus the synthetic initial entry step →
+    // 12 step events.
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(12),
+        "expected 12 step events (initial entry + 11 instr lines); counts={counts}"
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "set_less_than_test must not emit any io_events; counts={counts}"
+    );
+
+    let a0 = values_for(&doc, "arg0");
+    let a1 = values_for(&doc, "arg1");
+    let a2 = values_for(&doc, "arg2");
+    let a3 = values_for(&doc, "arg3");
+    let a4 = values_for(&doc, "arg4");
+    let s0 = values_for(&doc, "S0");
+    let s1 = values_for(&doc, "S1");
+    let t0 = values_for(&doc, "T0");
+    let t1 = values_for(&doc, "T1");
+    let t2 = values_for(&doc, "T2");
+
+    // Source operands: A0 = 0xFFFF_FFFF (= 4_294_967_295), A1 = 1.
+    assert!(
+        a0.contains(&0xFFFF_FFFF),
+        "A0 should snapshot 0xFFFF_FFFF; got {a0:?}"
+    );
+    assert!(a1.contains(&1), "A1 should snapshot 1; got {a1:?}");
+
+    // Reg-reg flips:
+    assert!(
+        s0.contains(&1),
+        "S0 = set_less_than_signed(0xFFFF_FFFF, 1) should be 1 (-1 < 1); got {s0:?}"
+    );
+    assert!(
+        s1.contains(&0),
+        "S1 = set_less_than_unsigned(0xFFFF_FFFF, 1) should be 0 (4G > 1); got {s1:?}"
+    );
+    assert!(
+        t0.contains(&0),
+        "T0 = set_less_than_signed(1, 0xFFFF_FFFF) should be 0 (1 > -1); got {t0:?}"
+    );
+    assert!(
+        t1.contains(&1),
+        "T1 = set_less_than_unsigned(1, 0xFFFF_FFFF) should be 1 (1 < 4G); got {t1:?}"
+    );
+
+    // Imm flips:
+    assert!(
+        t2.contains(&1),
+        "T2 = set_less_than_signed_imm(0xFFFF_FFFF, 1) should be 1 (-1 < 1); got {t2:?}"
+    );
+    assert!(
+        a2.contains(&0),
+        "A2 = set_less_than_unsigned_imm(0xFFFF_FFFF, 1) should be 0 (4G > 1); got {a2:?}"
+    );
+    assert!(
+        a3.contains(&0),
+        "A3 = set_less_than_signed_imm(1, 0xFFFF_FFFF) should be 0 (1 > -1); got {a3:?}"
+    );
+    assert!(
+        a4.contains(&1),
+        "A4 = set_less_than_unsigned_imm(1, 0xFFFF_FFFF) should be 1 (1 < 4G); got {a4:?}"
+    );
+}
+
+// ===========================================================================
+// indirect_call_dispatch_test — pins M11 limitation on jump_indirect(RA)
+// ===========================================================================
+//
+// RECORDER LIMITATION (M11):  the tracer's `jump_indirect` arm in
+// `src/tracer.rs::run_step_loop` treats EVERY `jump_indirect(RA, _)`
+// instruction as a function return (it emits `register_return`),
+// regardless of whether the value in RA was set up by a real
+// `load_imm_and_jump(RA, ret_pc, callee)` call sequence or by a
+// computed-dispatch pattern (load arbitrary target into RA → jump).
+//
+// A correct recorder would distinguish:
+//   * `load_imm_and_jump(RA, ret, target)` followed eventually by
+//     `jump_indirect(RA, _)` ← this RA holds the saved return PC, so
+//     the indirect-jump IS a return.
+//   * Computed dispatch where the program loads an arbitrary target
+//     into RA (e.g. table lookup, function-pointer call) and then
+//     jumps via `jump_indirect(RA, _)` ← this is a CALL, not a return,
+//     because the target is the callee's PC, not a saved return PC.
+//
+// This fixture builds the second pattern: it loads an arbitrary
+// target (the address of an unreachable basic block we'll let trap)
+// into RA via plain `load_imm`, then `jump_indirect(RA, _)`.
+//
+// PIN: today the recorder emits exactly one `register_return` for the
+// computed dispatch (matching the entry-point Call(main)).  A future
+// fix that adds proper computed-call-vs-return disambiguation will
+// instead emit a `register_call` here, and this assertion will need
+// to be updated.  Keeping this strict pin now means the fix is
+// observable the moment it lands.
+fn indirect_call_dispatch_program() -> Vec<Instruction> {
+    // Target: the program contains a `load_imm` then `jump_indirect(RA, 0)`.
+    // RA gets loaded with an arbitrary value (NOT a real ret-PC) — we use
+    // 0xFFFF_F000, which is well outside the program's own code segment,
+    // so the indirect jump leaves the program and PolkaVM finishes.
+    vec![
+        // -- 0 -- A0 sentinel so the trace shows we set up state before
+        //          the computed dispatch
+        asm::load_imm(A0, 0x4242),
+        // -- 1 -- Load an arbitrary target into RA (NOT a real return PC).
+        //          The target points outside the program; the indirect
+        //          jump will land there and PolkaVM will trap or finish.
+        asm::load_imm(RA, 0xFFFF_F000),
+        // -- 2 -- Computed dispatch via RA — a future-correct recorder
+        //          would emit register_call here; today it emits
+        //          register_return.
+        asm::jump_indirect(RA, 0),
+        // Dead code — not reached because the indirect jump leaves
+        // the program.
+        asm::load_imm(A0, 0xDEAD),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_indirect_call_dispatch_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_indirect_call_dispatch_test_via_ct_print_full",
+        "indirect_call_dispatch_test",
+        &indirect_call_dispatch_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // The recorder synthesises exactly one Call event for the program
+    // entry-point (`main`).  Today the computed dispatch via RA does
+    // NOT add a second `call_entry` — it triggers the recorder's
+    // jump_indirect(RA, _) arm which emits register_return only.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "indirect_call_dispatch_test must register only the entry-point \
+         `main`; got {:?}",
+        functions
+    );
+
+    let counts = &doc["counts"];
+    // CURRENT (incorrect) behaviour: the jump_indirect(RA, _) arm emits
+    // ONLY `register_return` for the computed dispatch — no extra call.
+    // A future correct recorder would emit `register_call` here, raising
+    // the call count to 2 and the call_entry sequence to `main` +
+    // `<computed-target>`.  This pin is intentionally strict so that
+    // future fix surfaces immediately.
+    //
+    // M11 LIMITATION: the recorder cannot tell the difference between
+    // a real return (RA set up by a `load_imm_and_jump`) and a computed
+    // call (RA loaded with an arbitrary target via `load_imm` etc.).
+    // See `src/tracer.rs::run_step_loop` jump_indirect arm.
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "M11 LIMITATION: only the entry-point Call(main) surfaces — the \
+         computed dispatch via RA is misclassified as register_return; \
+         a future recorder fix that adds proper call-vs-return \
+         disambiguation will raise this to 2 and break this pin; counts={counts}"
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "M11 LIMITATION: call_entry sequence is just [main]; the computed \
+         dispatch should add a second entry once the recorder supports \
+         computed-call detection"
+    );
+
+    // Count the call_exit events: this program produces exactly ONE
+    // call_entry (the entry-point `main`) but TWO `register_return`
+    // calls in the recorder — one from the jump_indirect(RA, _) arm
+    // (the M11 misclassification: it treats the computed dispatch as
+    // a return), and one from the Trap arm that fires when PolkaVM
+    // lands at the unmapped 0xFFFF_F000 target.  ct-print --full
+    // surfaces both as `call_exit` events in the events stream.
+    //
+    // (Empirically observed: ct-print emits exactly one synthetic
+    // `call_exit` here — the writer / ct-print pipeline collapses
+    // unbalanced returns onto the outermost frame.  The load-bearing
+    // pin is the call_entry count + the dead-code invariant + the
+    // single-`main` functions table.)
+    let events = doc["events"].as_array().expect("events array");
+    let call_exits: usize = events.iter().filter(|e| e["kind"] == "call_exit").count();
+    let call_entries: usize = events.iter().filter(|e| e["kind"] == "call_entry").count();
+    assert_eq!(
+        call_entries, 1,
+        "expected exactly 1 call_entry (the entry-point Call); got {call_entries}"
+    );
+    assert_eq!(
+        call_exits, 1,
+        "expected exactly 1 call_exit (ct-print collapses the multiple \
+         register_return invocations from the M11 misclassification + \
+         Trap arm onto a single outermost-frame exit); got {call_exits}"
+    );
+
+    // The pre-dispatch sentinel must surface in A0 — proves the
+    // recorder stepped through the load_imm(A0, 0x4242) before the
+    // computed dispatch.
+    let a0 = values_for(&doc, "arg0");
+    assert!(
+        a0.contains(&0x4242),
+        "A0 should snapshot the pre-dispatch sentinel 0x4242; got {a0:?}"
+    );
+    // The dead-code sentinel (after the indirect jump) must NOT surface.
+    assert!(
+        !a0.contains(&0xDEAD),
+        "A0 must NOT snapshot the post-dispatch dead-code sentinel \
+         0xDEAD — control flow continued past the indirect jump; got {a0:?}"
+    );
+
+    // RA must surface the computed dispatch target 0xFFFF_F000 — the
+    // step before the jump.
+    let ra = values_for(&doc, "RA");
+    assert!(
+        ra.contains(&0xFFFF_F000),
+        "RA should snapshot the computed dispatch target 0xFFFF_F000; got {ra:?}"
+    );
+}
+
+// ===========================================================================
+// pallet_revive_event_test — `seal_deposit_event` host call
+// ===========================================================================
+//
+// `seal_deposit_event` is the pallet-revive host function that ink!
+// contracts use to emit Substrate events (the analogue of EVM `LOG*`
+// opcodes).  Pre-M12 the recorder routed ecalli index 4 onto
+// `EventLogKind::EvmEvent` with a synthesised `ink_deposit_event`
+// metadata blob (see `src/tracer.rs` Ecalli arm), but no fixture
+// pinned the end-to-end behaviour: a regression that dropped the
+// canonical name from the resolver, or that broke the EvmEvent
+// routing, would have gone unnoticed.
+//
+// This fixture stages the canonical seal_deposit_event argument vector
+// (A0=topics_ptr, A1=topics_len, A2=data_ptr, A3=data_len) then issues
+// the ecalli.  It pins:
+//
+//   1. The canonical name `seal_deposit_event` (NOT `ecalli_4`)
+//      surfaces in both the functions table AND the call sequence.
+//   2. The ecalli routes onto exactly one io_event with the correct
+//      metadata (topics_ptr / topics_len / data_ptr / data_len).
+//   3. The A0..A3 register snapshots at the call boundary carry the
+//      exact pointer/length values via the synthetic `args` Sequence.
+fn pallet_revive_event_program() -> Vec<Instruction> {
+    vec![
+        // seal_deposit_event(topics_ptr=0x2000, topics_len=64,
+        //                    data_ptr=0x2100, data_len=128)
+        asm::load_imm(A0, 0x2000),
+        asm::load_imm(A1, 64),
+        asm::load_imm(A2, 0x2100),
+        asm::load_imm(A3, 128),
+        asm::ecalli(4), // seal_deposit_event
+        // Sentinel: post-event register snapshot.
+        asm::load_imm(A0, 0xBEEF),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_pallet_revive_event_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_pallet_revive_event_test_via_ct_print_full",
+        "pallet_revive_event_test",
+        &pallet_revive_event_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // Functions table must contain main + seal_deposit_event in source order.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for f in &["main", "seal_deposit_event"] {
+        assert!(
+            functions.iter().any(|fname| fname == f),
+            "expected `{f}` in functions table; got {:?}",
+            functions
+        );
+    }
+    // The raw ecalli-index name `ecalli_4` MUST NOT surface — the
+    // host_functions resolver must have mapped index 4 to the
+    // canonical `seal_deposit_event` name.
+    assert!(
+        !functions.iter().any(|fname| *fname == "ecalli_4"),
+        "raw `ecalli_4` must NOT appear in the functions table; the \
+         host_functions resolver must canonicalise it to \
+         `seal_deposit_event`; got {:?}",
+        functions
+    );
+
+    // Call sequence: entry-point Call(main) + Call(seal_deposit_event).
+    let call_sequence = observed_call_sequence(&doc);
+    assert_eq!(
+        call_sequence,
+        vec!["main".to_string(), "seal_deposit_event".to_string(),],
+        "call_entry events must appear in entry-point + ecalli order with \
+         the canonical pallet-revive name"
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(2),
+        "expected exactly 2 call events (1 entry-point + 1 ecalli); counts={counts}"
+    );
+    // Per `src/tracer.rs` Ecalli arm, index 4 is routed onto
+    // EventLogKind::EvmEvent with name `ink_deposit_event`.  ct-print
+    // collapses that through `toIOEventKind` to ioEvmEvent.
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "expected exactly 1 io_event (seal_deposit_event routed onto \
+         EvmEvent); counts={counts}"
+    );
+
+    // Inspect the io stream.
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
+    let text = io_events[0]["text"].as_str().unwrap_or("");
+    // Strict pin: the event metadata must carry the EXACT pointer /
+    // length values from A0..A3 at the call boundary.
+    assert_eq!(
+        text, "topics_ptr=0x2000 topics_len=64 data_ptr=0x2100 data_len=128",
+        "io event text must encode the canonical seal_deposit_event \
+         argument vector EXACTLY; got {text:?}"
+    );
+
+    // Strict per-step args Sequence check: there must exist a step
+    // whose Sequence snapshots EXACTLY the seal_deposit_event argument
+    // vector [topics_ptr, topics_len, data_ptr, data_len, 0, 0].
+    let args_seqs = observed_args_sequence_vars(&doc);
+    let expected_event: [i64; 6] = [0x2000, 64, 0x2100, 128, 0, 0];
+    assert!(
+        args_seqs.contains(&expected_event),
+        "expected args Sequence {expected_event:?} (seal_deposit_event \
+         args) at some step; got {args_seqs:?}"
+    );
+
+    // The post-event sentinel 0xBEEF must surface in A0 — proves
+    // execution continued past the ecalli.
+    let a0 = values_for(&doc, "arg0");
+    assert!(
+        a0.contains(&0xBEEF),
+        "A0 should snapshot the post-event sentinel 0xBEEF; got {a0:?}"
+    );
+
+    // Pre-event topic / data pointers must surface in A0 / A2.
+    let a2 = values_for(&doc, "arg2");
+    assert!(
+        a0.contains(&0x2000),
+        "A0 should snapshot the topics pointer 0x2000; got {a0:?}"
+    );
+    assert!(
+        a2.contains(&0x2100),
+        "A2 should snapshot the data pointer 0x2100; got {a2:?}"
     );
 }
