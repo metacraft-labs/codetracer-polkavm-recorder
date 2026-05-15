@@ -28,8 +28,16 @@
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
+      let
+        pkgs = import nixpkgs { inherit system; };
+      in
       {
-        devShells.default = mcl-blockchain.devShells.${system}.polkavm;
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ mcl-blockchain.devShells.${system}.polkavm ];
+          packages = [
+            pkgs.zstd # required by libcodetracer_trace_writer (Nim FFI)
+          ];
+        };
       }
     );
 }
