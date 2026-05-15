@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueRecord};
+use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
-use eyre::{Context, Result, eyre};
+use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
+use eyre::{eyre, Context, Result};
 use polkavm::{
     Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg,
 };
@@ -809,6 +809,37 @@ impl PolkaVmTracer {
                                 ),
                             );
                         }
+                        7 => {
+                            // seal_call(dest_ptr, value_ptr, gas_limit,
+                            //           input_ptr, input_len,
+                            //           output_ptr_or_len_ptr)
+                            //
+                            // Cross-contract invocation.  The pallet-revive
+                            // host function takes the destination address
+                            // pointer (A0), the value pointer (A1), the
+                            // gas-limit immediate (A2), and the input
+                            // calldata buffer (A3=ptr, A4=len), with
+                            // A5 carrying the output buffer pointer.
+                            // Surface this on the structured trace-log
+                            // stream so the frontend can show
+                            // cross-contract calls distinctly from generic
+                            // host calls (mirrors EVM CALL routing).
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::TraceLogEvent,
+                                "seal_call",
+                                &format!(
+                                    "dest_ptr={:#x} value_ptr={:#x} gas_limit={} \
+                                     input_ptr={:#x} input_len={} output_ptr={:#x}",
+                                    instance.reg(Reg::A0),
+                                    instance.reg(Reg::A1),
+                                    instance.reg(Reg::A2),
+                                    instance.reg(Reg::A3),
+                                    instance.reg(Reg::A4),
+                                    instance.reg(Reg::A5),
+                                ),
+                            );
+                        }
                         9 => {
                             // seal_terminate(beneficiary_ptr)
                             TraceWriter::register_special_event(
@@ -816,6 +847,34 @@ impl PolkaVmTracer {
                                 EventLogKind::TraceLogEvent,
                                 "ink_terminate",
                                 &format!("beneficiary_ptr={:#x}", instance.reg(Reg::A0)),
+                            );
+                        }
+                        19 => {
+                            // seal_hash_keccak_256(input_ptr, input_len, output_ptr)
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::TraceLogEvent,
+                                "seal_hash_keccak_256",
+                                &format!(
+                                    "input_ptr={:#x} input_len={} output_ptr={:#x}",
+                                    instance.reg(Reg::A0),
+                                    instance.reg(Reg::A1),
+                                    instance.reg(Reg::A2),
+                                ),
+                            );
+                        }
+                        20 => {
+                            // seal_hash_blake2_256(input_ptr, input_len, output_ptr)
+                            TraceWriter::register_special_event(
+                                &mut *self.writer,
+                                EventLogKind::TraceLogEvent,
+                                "seal_hash_blake2_256",
+                                &format!(
+                                    "input_ptr={:#x} input_len={} output_ptr={:#x}",
+                                    instance.reg(Reg::A0),
+                                    instance.reg(Reg::A1),
+                                    instance.reg(Reg::A2),
+                                ),
                             );
                         }
                         28 => {

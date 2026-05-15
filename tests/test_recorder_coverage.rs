@@ -3702,3 +3702,597 @@ fn test_pallet_revive_event_test_via_ct_print_full() {
         "A2 should snapshot the data pointer 0x2100; got {a2:?}"
     );
 }
+
+// ===========================================================================
+// pallet_revive_hash_test — `seal_hash_blake2_256` + `seal_hash_keccak_256`
+// ===========================================================================
+//
+// `seal_hash_blake2_256` (ecalli 20) and `seal_hash_keccak_256` (ecalli 19)
+// are the two pallet-revive hashing primitives ink! contracts call to
+// produce 32-byte digests of a memory range.  Pre-M12 the recorder mapped
+// both indices to their canonical names in `src/host_functions.rs` but
+// emitted no structured event for either, so a regression that dropped
+// the canonical name from the resolver, or swapped the keccak / blake
+// indices, would have gone unnoticed.
+//
+// The fixture stages the canonical [input_ptr, input_len, output_ptr]
+// argument vector for each hash primitive then issues both ecallis in
+// sequence.  It pins:
+//
+//   1. The canonical names `seal_hash_blake2_256` / `seal_hash_keccak_256`
+//      (NOT `ecalli_19` / `ecalli_20`) surface in both the functions
+//      table AND the call sequence.
+//   2. Each ecalli routes onto exactly one io_event with the canonical
+//      input/output metadata (TraceLogEvent → ioStderr).
+//   3. The A0..A2 register snapshots at each call boundary carry the
+//      exact pointer / length values via the synthetic `args` Sequence.
+fn pallet_revive_hash_program() -> Vec<Instruction> {
+    vec![
+        // First: seal_hash_blake2_256(input_ptr=0x3000, input_len=64,
+        //                             output_ptr=0x3100)
+        asm::load_imm(A0, 0x3000),
+        asm::load_imm(A1, 64),
+        asm::load_imm(A2, 0x3100),
+        asm::ecalli(20), // seal_hash_blake2_256
+        // Second: seal_hash_keccak_256(input_ptr=0x4000, input_len=128,
+        //                              output_ptr=0x4100)
+        asm::load_imm(A0, 0x4000),
+        asm::load_imm(A1, 128),
+        asm::load_imm(A2, 0x4100),
+        asm::ecalli(19), // seal_hash_keccak_256
+        // Sentinel: post-hash register snapshot.
+        asm::load_imm(A0, 0xCAFE),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_pallet_revive_hash_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_pallet_revive_hash_test_via_ct_print_full",
+        "pallet_revive_hash_test",
+        &pallet_revive_hash_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // Functions table must contain main + seal_hash_blake2_256 +
+    // seal_hash_keccak_256 in source order (blake2 first, keccak second).
+    // Pin the EXACT functions table so a future regression that adds /
+    // drops a function surfaces immediately.  The raw `ecalli_19` /
+    // `ecalli_20` names MUST NOT appear — the host_functions resolver
+    // must canonicalise them.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main", "seal_hash_blake2_256", "seal_hash_keccak_256"],
+        "expected EXACT functions table [main, seal_hash_blake2_256, \
+         seal_hash_keccak_256] in source order; got {functions:?}"
+    );
+
+    // Call sequence: entry-point Call(main) + Call(seal_hash_blake2_256)
+    // + Call(seal_hash_keccak_256), exactly in source order.
+    let call_sequence = observed_call_sequence(&doc);
+    assert_eq!(
+        call_sequence,
+        vec![
+            "main".to_string(),
+            "seal_hash_blake2_256".to_string(),
+            "seal_hash_keccak_256".to_string(),
+        ],
+        "call_entry events must appear in entry-point + ecalli source order \
+         with the canonical pallet-revive hash names"
+    );
+
+    // Counts: 1 entry-point Call + 2 ecalli Calls = 3 calls.  Two
+    // io_events: both ecallis route onto EventLogKind::TraceLogEvent,
+    // collapsed to ioStderr by toIOEventKind.
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(3),
+        "expected exactly 3 call events (1 entry-point + 2 ecalli); counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(2),
+        "expected exactly 2 io_events (seal_hash_blake2_256 + \
+         seal_hash_keccak_256 both routed onto TraceLogEvent); counts={counts}"
+    );
+
+    // Inspect the io stream in source order.  Pin EXACT text payload
+    // for each io event so a regression that drops a field, swaps an
+    // operand, or alters the formatting surfaces immediately.
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(io_events.len(), 2, "expected exactly 2 io event entries");
+    assert_eq!(
+        io_events[0]["io_kind"].as_str(),
+        Some("ioStderr"),
+        "io_event[0] should carry io_kind=ioStderr (TraceLogEvent collapsed \
+         by toIOEventKind); got {}",
+        io_events[0]
+    );
+    assert_eq!(
+        io_events[1]["io_kind"].as_str(),
+        Some("ioStderr"),
+        "io_event[1] should carry io_kind=ioStderr (TraceLogEvent collapsed \
+         by toIOEventKind); got {}",
+        io_events[1]
+    );
+    assert_eq!(
+        io_events[0]["text"].as_str(),
+        Some("input_ptr=0x3000 input_len=64 output_ptr=0x3100"),
+        "first io event must encode the canonical seal_hash_blake2_256 \
+         argument vector EXACTLY"
+    );
+    assert_eq!(
+        io_events[1]["text"].as_str(),
+        Some("input_ptr=0x4000 input_len=128 output_ptr=0x4100"),
+        "second io event must encode the canonical seal_hash_keccak_256 \
+         argument vector EXACTLY"
+    );
+
+    // Strict per-step args Sequence check: there must exist a step
+    // whose Sequence snapshots EXACTLY the seal_hash_blake2_256
+    // argument vector [0x3000, 64, 0x3100, 0, 0, 0], and another step
+    // whose Sequence snapshots the seal_hash_keccak_256 vector
+    // [0x4000, 128, 0x4100, 0, 0, 0].  A4/A5 are unused by the hash
+    // primitives so the canonical Sequence carries 0 in those slots.
+    let args_seqs = observed_args_sequence_vars(&doc);
+    let expected_blake2: [i64; 6] = [0x3000, 64, 0x3100, 0, 0, 0];
+    let expected_keccak: [i64; 6] = [0x4000, 128, 0x4100, 0, 0, 0];
+    assert!(
+        args_seqs.contains(&expected_blake2),
+        "expected args Sequence {expected_blake2:?} (seal_hash_blake2_256 \
+         args) at some step; got {args_seqs:?}"
+    );
+    assert!(
+        args_seqs.contains(&expected_keccak),
+        "expected args Sequence {expected_keccak:?} (seal_hash_keccak_256 \
+         args) at some step; got {args_seqs:?}"
+    );
+}
+
+// ===========================================================================
+// pallet_revive_cross_contract_call_test — `seal_call` host call
+// ===========================================================================
+//
+// `seal_call` (ecalli 7) is the pallet-revive cross-contract invocation
+// host function — it lets one ink! contract call into another with
+// calldata, value, and a gas limit.  Pre-M12 the recorder mapped index
+// 7 to the canonical name `seal_call` in `src/host_functions.rs` but
+// emitted no structured event for it, so a regression that dropped the
+// canonical name (or that misrouted the call onto a different host
+// function) would have gone unnoticed.
+//
+// The fixture stages the canonical [dest_ptr, value_ptr, gas_limit,
+// input_ptr, input_len, output_ptr] argument vector then issues the
+// ecalli.  It pins:
+//
+//   1. The canonical name `seal_call` (NOT `ecalli_7`) surfaces in both
+//      the functions table AND the call sequence.
+//   2. The ecalli routes onto exactly one io_event carrying the canonical
+//      cross-contract metadata (TraceLogEvent → ioStderr).
+//   3. The A0..A5 register snapshots at the call boundary carry the
+//      exact destination / value / gas / input / output values via the
+//      synthetic `args` Sequence.
+fn pallet_revive_cross_contract_call_program() -> Vec<Instruction> {
+    vec![
+        // seal_call(dest_ptr=0x5000, value_ptr=0x5100, gas_limit=1_000_000,
+        //           input_ptr=0x5200, input_len=64, output_ptr=0x5300)
+        asm::load_imm(A0, 0x5000),
+        asm::load_imm(A1, 0x5100),
+        asm::load_imm(A2, 1_000_000),
+        asm::load_imm(A3, 0x5200),
+        asm::load_imm(A4, 64),
+        asm::load_imm(A5, 0x5300),
+        asm::ecalli(7), // seal_call
+        // Sentinel: post-call register snapshot.
+        asm::load_imm(A0, 0xC0DE),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_pallet_revive_cross_contract_call_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_pallet_revive_cross_contract_call_test_via_ct_print_full",
+        "pallet_revive_cross_contract_call_test",
+        &pallet_revive_cross_contract_call_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // Functions table: EXACTLY [main, seal_call] in source order.  The
+    // raw `ecalli_7` name MUST NOT surface — the host_functions
+    // resolver must canonicalise it.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main", "seal_call"],
+        "expected EXACT functions table [main, seal_call]; got {functions:?}"
+    );
+
+    // Call sequence: entry-point Call(main) + Call(seal_call).
+    let call_sequence = observed_call_sequence(&doc);
+    assert_eq!(
+        call_sequence,
+        vec!["main".to_string(), "seal_call".to_string()],
+        "call_entry events must appear in entry-point + ecalli order with \
+         the canonical pallet-revive name"
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(2),
+        "expected exactly 2 call events (1 entry-point + 1 ecalli); counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "expected exactly 1 io_event (seal_call routed onto \
+         TraceLogEvent); counts={counts}"
+    );
+
+    // Inspect the io stream — EXACT payload pin.
+    let events = doc["events"].as_array().expect("events array");
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
+    assert_eq!(
+        io_events[0]["io_kind"].as_str(),
+        Some("ioStderr"),
+        "io_event should carry io_kind=ioStderr (TraceLogEvent collapsed \
+         by toIOEventKind); got {}",
+        io_events[0]
+    );
+    assert_eq!(
+        io_events[0]["text"].as_str(),
+        Some(
+            "dest_ptr=0x5000 value_ptr=0x5100 gas_limit=1000000 \
+             input_ptr=0x5200 input_len=64 output_ptr=0x5300"
+        ),
+        "io event text must encode the canonical seal_call argument vector \
+         EXACTLY (destination, value, gas, input, output)"
+    );
+
+    // Strict per-step args Sequence check: there must exist a step whose
+    // Sequence snapshots EXACTLY the seal_call argument vector
+    // [dest_ptr, value_ptr, gas_limit, input_ptr, input_len, output_ptr].
+    let args_seqs = observed_args_sequence_vars(&doc);
+    let expected_call: [i64; 6] = [0x5000, 0x5100, 1_000_000, 0x5200, 64, 0x5300];
+    assert!(
+        args_seqs.contains(&expected_call),
+        "expected args Sequence {expected_call:?} (seal_call args) at some \
+         step; got {args_seqs:?}"
+    );
+
+    // The post-call sentinel 0xC0DE must surface in A0 — proves
+    // execution continued past the ecalli (host_handler returned true
+    // for known seal_call index 7).
+    let a0 = values_for(&doc, "arg0");
+    assert!(
+        a0.contains(&0xC0DE),
+        "A0 should snapshot the post-call sentinel 0xC0DE; got {a0:?}"
+    );
+}
+
+// ===========================================================================
+// move_reg_and_load_imm_test — register-to-register moves and load_imm
+// ===========================================================================
+//
+// PolkaVM exposes two foundational data-movement opcodes:
+//
+//   * `load_imm(dst, imm)`: write a 32-bit constant into `dst`.
+//   * `move_reg(dst, src)`: copy `src` into `dst`, leaving every other
+//     register unchanged (assembled as `dst = src`).
+//
+// Pre-M12 there was no fixture exercising the `move_reg` opcode at all,
+// and the load_imm opcode only ever appeared as setup for other tests.
+// A regression that swapped `move_reg`'s operand order (writing src ←
+// dst), that clobbered an unrelated register, or that silently dropped
+// the move on a particular destination would not have surfaced.
+//
+// The fixture stages a sequence of moves and immediate-loads that
+// exercise distinct register classes (A0..A5 argument-conv, S0/S1
+// callee-saved, T0..T2 temp) so the per-step register snapshot pins
+// the EXACT semantics:
+//
+//   * load_imm(A0, 0x1111)        →  A0 := 0x1111
+//   * load_imm(A1, 0x2222)        →  A1 := 0x2222
+//   * move_reg(A2, A0)            →  A2 := A0 (= 0x1111); A0 unchanged
+//   * move_reg(A3, A1)            →  A3 := A1 (= 0x2222); A1 unchanged
+//   * load_imm(S0, 0xDEAD_BEEF)   →  S0 := 0xDEAD_BEEF
+//   * move_reg(S1, S0)            →  S1 := S0 (= 0xDEAD_BEEF)
+//   * load_imm(T0, 0)             →  T0 := 0  (zero-immediate edge)
+//   * move_reg(T1, T0)            →  T1 := 0
+//   * move_reg(T2, A0)            →  T2 := A0 (= 0x1111)  — cross-class move
+//   * load_imm(A4, 0xFFFF_FFFF)   →  A4 := 0xFFFF_FFFF (high-bit-set imm)
+//   * move_reg(A5, A4)            →  A5 := A4 (= 0xFFFF_FFFF)
+fn move_reg_and_load_imm_program() -> Vec<Instruction> {
+    vec![
+        // -- 0 --
+        asm::load_imm(A0, 0x1111),
+        // -- 1 --
+        asm::load_imm(A1, 0x2222),
+        // -- 2 -- A2 := A0
+        asm::move_reg(A2, A0),
+        // -- 3 -- A3 := A1
+        asm::move_reg(A3, A1),
+        // -- 4 --
+        asm::load_imm(S0, 0xDEAD_BEEF),
+        // -- 5 -- S1 := S0
+        asm::move_reg(S1, S0),
+        // -- 6 --
+        asm::load_imm(T0, 0),
+        // -- 7 -- T1 := T0
+        asm::move_reg(T1, T0),
+        // -- 8 -- T2 := A0  (cross-class move)
+        asm::move_reg(T2, A0),
+        // -- 9 --
+        asm::load_imm(A4, 0xFFFF_FFFF),
+        // -- 10 -- A5 := A4
+        asm::move_reg(A5, A4),
+        asm::ret(),
+    ]
+}
+
+#[test]
+fn test_move_reg_and_load_imm_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_move_reg_and_load_imm_test_via_ct_print_full",
+        "move_reg_and_load_imm_test",
+        &move_reg_and_load_imm_program(),
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // No host calls; only the synthesised entry-point Call(main).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["main"],
+        "move_reg_and_load_imm_test must register only the entry-point \
+         `main`; got {functions:?}"
+    );
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string()],
+        "move_reg_and_load_imm_test must emit only the entry-point Call(main)"
+    );
+
+    let counts = &doc["counts"];
+    // 12 instructions execute (load A0, load A1, move A2/A0, move A3/A1,
+    // load S0, move S1/S0, load T0, move T1/T0, move T2/A0, load A4,
+    // move A5/A4, ret) on 12 distinct lines, plus the synthetic initial
+    // entry step from `TraceWriter::start` → 13 step events.
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(13),
+        "expected 13 step events (initial entry + 12 instr lines); counts={counts}"
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(1),
+        "only the entry-point Call(main) is expected; counts={counts}"
+    );
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "move_reg_and_load_imm_test must not emit any io_events; counts={counts}"
+    );
+
+    // The recorder snapshots ALL named registers on EVERY step, so each
+    // register's value-trace is the per-instruction sequence of its
+    // register-file value across the program.  Pin the EXACT sequence
+    // so the move/load semantics are observable end-to-end:
+    //
+    //   * A0: 0 → 0x1111 (after instr 0); stays 0x1111 thereafter
+    //         (never clobbered by any of the moves into other regs)
+    //   * A2: 0 until instr 2 then 0x1111
+    //   * S1: 0 until instr 5 then 0xDEAD_BEEF
+    //
+    // Using EXACT vector-equality assertions makes any drift in step
+    // count, opcode semantics, or register-file ordering surface as a
+    // mismatch.  The recorder emits the entry-step BEFORE executing
+    // instr 0, so A0's initial 0 surfaces twice (entry-step + post-load).
+    // Likewise every register surfaces 13 values total, one per step.
+
+    // 0xDEAD_BEEF as i64 with high bit clear (it's a 32-bit unsigned
+    // value zero-extended into i64) = 3_735_928_559.
+    let dead_beef: i64 = 0xDEAD_BEEF;
+    // 0xFFFF_FFFF zero-extended = 4_294_967_295.
+    let max_u32: i64 = 0xFFFF_FFFF;
+
+    // The recorder fires step tracing BEFORE the instruction at PC
+    // executes, so the per-step register snapshot shows the register
+    // file state as it was BEFORE that instruction ran.  The synthetic
+    // entry-step from `TraceWriter::start` does not emit register
+    // variables; only the 12 in-loop steps (one per executed
+    // instruction) carry a `vars` array.  So `values_for` returns
+    // exactly 12 entries per register.
+    //
+    // For each register we pin the EXACT 12-entry value-trace: any
+    // drift in opcode semantics, register-file ordering, instruction
+    // count, or accidental clobber surfaces as a vector mismatch.
+
+    // A0 trace: 0 (before instr 0, the load_imm hasn't fired yet),
+    // then 0x1111 from instr 1 onwards (load_imm(A0, 0x1111) just ran
+    // before instr 1's step is observed).  A0 is never clobbered by
+    // any of the moves into other registers.
+    let a0 = values_for(&doc, "arg0");
+    let mut expected_a0 = vec![0i64];
+    expected_a0.extend(std::iter::repeat_n(0x1111i64, 11));
+    assert_eq!(
+        a0, expected_a0,
+        "A0 must surface as [0, then 0x1111 x11] — moves into other regs \
+         must NOT clobber A0 (snapshot fires BEFORE the next instruction \
+         so step 1 sees pre-load A0=0 and steps 2..12 see post-load 0x1111)"
+    );
+
+    // A1 trace: 0 x2 (before instr 0 + instr 1), then 0x2222 x10 (after
+    // load_imm(A1, 0x2222) at instr 1).
+    let a1 = values_for(&doc, "arg1");
+    let mut expected_a1 = vec![0i64; 2];
+    expected_a1.extend(std::iter::repeat_n(0x2222i64, 10));
+    assert_eq!(
+        a1, expected_a1,
+        "A1 must surface as [0 x2, then 0x2222 x10]"
+    );
+
+    // A2 trace: 0 x3 (before instr 0..2), then 0x1111 x9 (after
+    // move_reg(A2, A0) at instr 2 copies A0's 0x1111 into A2).
+    let a2 = values_for(&doc, "arg2");
+    let mut expected_a2 = vec![0i64; 3];
+    expected_a2.extend(std::iter::repeat_n(0x1111i64, 9));
+    assert_eq!(
+        a2, expected_a2,
+        "A2 must surface as [0 x3, then 0x1111 x9] — move_reg(A2, A0) \
+         copies A0's value into A2"
+    );
+
+    // A3 trace: 0 x4, then 0x2222 x8 (move_reg(A3, A1) at instr 3).
+    let a3 = values_for(&doc, "arg3");
+    let mut expected_a3 = vec![0i64; 4];
+    expected_a3.extend(std::iter::repeat_n(0x2222i64, 8));
+    assert_eq!(
+        a3, expected_a3,
+        "A3 must surface as [0 x4, then 0x2222 x8] — move_reg(A3, A1) \
+         copies A1's value into A3"
+    );
+
+    // S0 trace: 0 x5, then 0xDEAD_BEEF x7 (load_imm(S0, ...) at instr 4).
+    let s0 = values_for(&doc, "S0");
+    let mut expected_s0 = vec![0i64; 5];
+    expected_s0.extend(std::iter::repeat_n(dead_beef, 7));
+    assert_eq!(
+        s0, expected_s0,
+        "S0 must surface as [0 x5, then 0xDEAD_BEEF x7] — load_imm(S0, ...)"
+    );
+
+    // S1 trace: 0 x6, then 0xDEAD_BEEF x6 (move_reg(S1, S0) at instr 5).
+    let s1 = values_for(&doc, "S1");
+    let mut expected_s1 = vec![0i64; 6];
+    expected_s1.extend(std::iter::repeat_n(dead_beef, 6));
+    assert_eq!(
+        s1, expected_s1,
+        "S1 must surface as [0 x6, then 0xDEAD_BEEF x6] — \
+         move_reg(S1, S0) copies S0's value into S1"
+    );
+
+    // T0 trace: 0 throughout — load_imm(T0, 0) loads zero, and no
+    // other instruction touches T0.  All 12 entries must be 0.
+    let t0 = values_for(&doc, "T0");
+    assert_eq!(
+        t0,
+        vec![0i64; 12],
+        "T0 must remain 0 throughout — load_imm(T0, 0) is the no-op load"
+    );
+
+    // T1 trace: 0 throughout — set by move_reg(T1, T0=0) at instr 7,
+    // value is 0 and stays 0.
+    let t1 = values_for(&doc, "T1");
+    assert_eq!(
+        t1,
+        vec![0i64; 12],
+        "T1 must remain 0 throughout — move_reg(T1, T0=0) preserves 0"
+    );
+
+    // T2 trace: 0 x9, then 0x1111 x3 (move_reg(T2, A0) at instr 8 —
+    // cross-class move from A-register to T-register).
+    let t2 = values_for(&doc, "T2");
+    let mut expected_t2 = vec![0i64; 9];
+    expected_t2.extend(std::iter::repeat_n(0x1111i64, 3));
+    assert_eq!(
+        t2, expected_t2,
+        "T2 must surface as [0 x9, then 0x1111 x3] — cross-class \
+         move_reg(T2, A0) copies A0's value into T2"
+    );
+
+    // A4 trace: 0 x10, then 0xFFFF_FFFF x2 (load_imm at instr 9 with
+    // the high-bit-set immediate, zero-extended into i64).
+    let a4 = values_for(&doc, "arg4");
+    let mut expected_a4 = vec![0i64; 10];
+    expected_a4.extend(std::iter::repeat_n(max_u32, 2));
+    assert_eq!(
+        a4, expected_a4,
+        "A4 must surface as [0 x10, then 0xFFFF_FFFF x2] — load_imm with \
+         the high-bit-set immediate (zero-extended into i64)"
+    );
+
+    // A5 trace: 0 x11, then 0xFFFF_FFFF (move_reg(A5, A4) at instr 10).
+    let a5 = values_for(&doc, "arg5");
+    let mut expected_a5 = vec![0i64; 11];
+    expected_a5.push(max_u32);
+    assert_eq!(
+        a5, expected_a5,
+        "A5 must surface as [0 x11, then 0xFFFF_FFFF] — \
+         move_reg(A5, A4) copies A4's value into A5"
+    );
+
+    // Strict per-step args Sequence pin: the synthetic [A0..A5] vector
+    // must transition through the EXACT sequence below, one entry per
+    // executed instruction, capturing the move/load semantics across
+    // the argument-class registers in lockstep with the per-register
+    // pins above.  Step tracing fires BEFORE the instruction at PC, so
+    // each entry shows the register file as it was BEFORE that
+    // instruction executed; the post-state of each load/move is
+    // observed on the NEXT step.
+    let args_seqs = observed_args_sequence_vars(&doc);
+    let expected_args: Vec<[i64; 6]> = vec![
+        // step 1: before instr 0 (load_imm A0) — all zero
+        [0, 0, 0, 0, 0, 0],
+        // step 2: before instr 1 (load_imm A1) — A0=0x1111 visible
+        [0x1111, 0, 0, 0, 0, 0],
+        // step 3: before instr 2 (move A2/A0) — A1=0x2222 visible
+        [0x1111, 0x2222, 0, 0, 0, 0],
+        // step 4: before instr 3 (move A3/A1) — A2=0x1111 visible
+        [0x1111, 0x2222, 0x1111, 0, 0, 0],
+        // step 5: before instr 4 (load_imm S0) — A3=0x2222 visible
+        [0x1111, 0x2222, 0x1111, 0x2222, 0, 0],
+        // step 6: before instr 5 (move S1/S0) — instr 4 didn't touch A0..A5
+        [0x1111, 0x2222, 0x1111, 0x2222, 0, 0],
+        // step 7: before instr 6 (load_imm T0) — instr 5 didn't touch A0..A5
+        [0x1111, 0x2222, 0x1111, 0x2222, 0, 0],
+        // step 8: before instr 7 (move T1/T0) — instr 6 didn't touch A0..A5
+        [0x1111, 0x2222, 0x1111, 0x2222, 0, 0],
+        // step 9: before instr 8 (move T2/A0) — instr 7 didn't touch A0..A5
+        [0x1111, 0x2222, 0x1111, 0x2222, 0, 0],
+        // step 10: before instr 9 (load_imm A4) — instr 8 didn't touch A0..A5
+        [0x1111, 0x2222, 0x1111, 0x2222, 0, 0],
+        // step 11: before instr 10 (move A5/A4) — A4=0xFFFF_FFFF visible
+        [0x1111, 0x2222, 0x1111, 0x2222, max_u32, 0],
+        // step 12: before instr 11 (ret) — A5=0xFFFF_FFFF visible
+        [0x1111, 0x2222, 0x1111, 0x2222, max_u32, max_u32],
+    ];
+    assert_eq!(
+        args_seqs, expected_args,
+        "synthetic `args` Sequence must transition through the EXACT \
+         per-step register-file snapshot capturing every move/load step"
+    );
+}
