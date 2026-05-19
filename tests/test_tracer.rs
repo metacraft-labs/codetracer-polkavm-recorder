@@ -901,14 +901,10 @@ fn export_fixture() {
         },
         ".ct should exist in fixture output"
     );
-    assert!(
-        out_dir.join("trace_metadata.json").exists(),
-        "trace_metadata.json should exist in fixture output"
-    );
-    assert!(
-        out_dir.join("trace_paths.json").exists(),
-        "trace_paths.json should exist in fixture output"
-    );
+    // Legacy `trace_metadata.json` / `trace_paths.json` sidecars were
+    // retired with the v3 CTFS rollout (follow-up #254 phase 2);
+    // program / paths metadata now lives in `meta.dat` inside the `.ct`
+    // container asserted above.
 
     eprintln!("Fixture exported to {}", out_dir.display());
 }
