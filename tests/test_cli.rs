@@ -29,9 +29,18 @@ use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 fn cargo_bin() -> Command {
-    let mut cmd = Command::new(env!("CARGO"));
-    cmd.args(["run", "--quiet", "--"]);
-    cmd
+    // Invoke the pre-built recorder binary directly via the
+    // `CARGO_BIN_EXE_<name>` path Cargo exposes to integration tests.
+    //
+    // The previous `cargo run --quiet --` form spawned a *nested* `cargo`
+    // inside the `cargo test` process.  The nested invocation contends for
+    // the build lock on `target/` that the outer `cargo test` already
+    // holds; under that contention `cargo run` can exit non-zero before it
+    // ever launches the recorder, which surfaced as an intermittent
+    // `--help should succeed` failure (the lock-contention window is a
+    // race, so only whichever CLI test ran first was affected).  The
+    // direct-binary form has no nested cargo and no lock contention.
+    Command::new(env!("CARGO_BIN_EXE_codetracer-polkavm-recorder"))
 }
 
 /// Path to the `ct-print` binary shipped with `codetracer-trace-format-nim`.
