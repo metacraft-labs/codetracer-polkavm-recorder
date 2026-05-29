@@ -1,3 +1,12 @@
 /target
 .env
 .direnv
+
+# Nix-generated pre-commit config
+.pre-commit-config.yaml
+
+# Nix build outputs
+result
+result-bin
+result-lib
+result-man
