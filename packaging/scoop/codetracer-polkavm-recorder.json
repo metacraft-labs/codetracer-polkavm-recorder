@@ -1,0 +1,23 @@
+{
+  "version": "0.1.0",
+  "description": "CodeTracer recorder for PolkaVM programs (RISC-V based virtual machine)",
+  "homepage": "https://github.com/metacraft-labs/codetracer-polkavm-recorder",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/metacraft-labs/codetracer-polkavm-recorder/releases/download/v0.1.0/codetracer-polkavm-recorder-0.1.0-windows-x86_64.zip",
+      "hash": "REPLACE_AT_PUBLISH_TIME_windows_x86_64"
+    }
+  },
+  "bin": "codetracer-polkavm-recorder.exe",
+  "checkver": {
+    "github": "https://github.com/metacraft-labs/codetracer-polkavm-recorder"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/metacraft-labs/codetracer-polkavm-recorder/releases/download/v$version/codetracer-polkavm-recorder-$version-windows-x86_64.zip"
+      }
+    }
+  }
+}
