@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
-use eyre::{eyre, Context, Result};
+use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
+use eyre::{Context, Result, eyre};
 use polkavm::{
     Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg,
 };
@@ -265,7 +265,8 @@ impl PolkaVmTracer {
 
         // -- 9. Finish writing -----------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
-        tracer.writer
+        tracer
+            .writer
             .write_meta_dat("codetracer-polkavm-recorder")
             .map_err(|e| eyre!("{e}"))?;
         tracer.writer.close().map_err(|e| eyre!("{e}"))?;
