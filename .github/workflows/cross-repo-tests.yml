@@ -139,17 +139,29 @@ jobs:
       - name: Clone codetracer
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # ``--shallow-submodules`` shallow-fetches each direct submodule
+        # but does NOT recurse into nested submodules; the codetracer
+        # nix build later fetches ``libs/NimYAML/test/yaml-test-suite``
+        # (NimYAML's own submodule) and aborts with ``does not appear
+        # to be a git repository`` when it's missing.  Drop
+        # ``--shallow-submodules`` and add an explicit recursive
+        # ``submodule update --init`` so every nested .git/ exists.
         run: |
           CT_REF="${{ steps.resolve-refs.outputs.codetracer_ref }}"
           DEST="$GITHUB_WORKSPACE/../codetracer"
           rm -rf "$DEST"
-          git clone --depth 1 --recurse-submodules --shallow-submodules \
+          git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer.git" \
             "$DEST"
           if [ "$CT_REF" != "main" ]; then
             git -C "$DEST" fetch origin "$CT_REF"
             git -C "$DEST" checkout "$CT_REF"
           fi
+          # Initialise every submodule (incl. nested) so the nix build's
+          # internal ``git fetch file://...libs/NimYAML/test/yaml-test-suite``
+          # finds a real repo to read from.  ``|| true`` tolerates the
+          # few submodules whose pinned SHA was force-pushed away.
+          git -C "$DEST" submodule update --init --recursive --depth 1 || true
 
       - name: Clone codetracer-vscode-extension
         env:
