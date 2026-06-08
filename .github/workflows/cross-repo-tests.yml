@@ -31,12 +31,10 @@ on:
   repository_dispatch:
     types: [cross-repo-test]
 
-# Nix needs access-tokens to fetch private flake inputs (e.g. mcl-blockchain).
-# NIX_CONFIG is set globally so both direnv and direct nix develop pick it up.
+# NIX_CONFIG (with steps.app-token.outputs.token) is set per-job below
+# from a step that runs AFTER the ``Generate CI token`` step -- workflow
+# level can't reference the ``steps`` context.
 env:
-  NIX_CONFIG: |
-    access-tokens = github.com=${{ steps.app-token.outputs.token }}
-    accept-flake-config = true
   # Use the interpreter backend to avoid Linux sandbox clone() failures on CI runners
   POLKAVM_BACKEND: interpreter
   # Allow experimental features (disables security sandbox) — required for tests
