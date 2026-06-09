@@ -65,6 +65,15 @@ jobs:
       - name: Lint
         run: dev-exec just lint
 
+      - name: Allow unprivileged user namespaces
+        # PolkaVM's Linux sandbox needs unprivileged user
+        # namespaces to spawn its sandboxed worker process.
+        # Ubuntu noble (24.04) restricts these by default via
+        # apparmor; the test then fails with:
+        #   failed to create a sandboxed worker process; run
+        #   'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Test
         run: dev-exec just test
 
