@@ -161,7 +161,16 @@ jobs:
           # internal ``git fetch file://...libs/NimYAML/test/yaml-test-suite``
           # finds a real repo to read from.  ``|| true`` tolerates the
           # few submodules whose pinned SHA was force-pushed away.
-          git -C "$DEST" submodule update --init --recursive --depth 1 || true
+          #
+          # ``-c url.<authed>.insteadOf=<unauthed>`` rewrites the
+          # github.com URLs in .gitmodules so private submodules
+          # (e.g. libs/tree-sitter-nim) authenticate via the same
+          # app-token used for the parent clone.  Scoped to this
+          # one invocation so the runner's global config is
+          # untouched.
+          git -C "$DEST" \
+            -c "url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf=https://github.com/" \
+            submodule update --init --recursive --depth 1 || true
 
       - name: Clone codetracer-vscode-extension
         env:
