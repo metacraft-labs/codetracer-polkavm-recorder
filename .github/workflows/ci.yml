@@ -1,5 +1,9 @@
 name: CI
 
+# Re-plays the project's deterministic dev env on the runner.
+# See:
+#   https://github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/ci-shared-dev-env.md
+
 on:
   push:
     branches: [main, dev, stable]
@@ -13,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone codetracer-trace-format (Cargo path dependency)
+      - name: Clone codetracer-trace-format sibling
         run: |
           PINS=".github/sibling-pins"
           TF_REF="main"
@@ -31,67 +35,38 @@ jobs:
             git -C "${GITHUB_WORKSPACE}/../codetracer-trace-format" checkout "${TF_REF}"
           fi
 
-
-      - name: Install Nim
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: "2.2.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build Nim trace writer library
+      - name: Clone codetracer-trace-format-nim sibling
         run: |
+          rm -rf "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
           git clone --depth 1 \
             "https://github.com/metacraft-labs/codetracer-trace-format-nim.git" \
             "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          nimble install -y stew results
-          nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
-            -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
-          echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y capnproto
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup dev env
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
-          components: clippy, rustfmt
+          env-flavor: nix
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Relax AppArmor user-namespace restriction
-        # PolkaVM's Linux sandbox needs unprivileged user namespaces,
-        # which ubuntu-latest restricts via AppArmor by default.
-        # This is best-effort; the POLKAVM_SANDBOXING_ENABLED=false
-        # fallback below guarantees tests still pass if this fails.
+      - name: Build Nim trace writer library (sibling artifact)
+        # TODO: replace with `direnv exec ../codetracer-trace-format-nim
+        # just build-trace-writer-lib` once the sibling repo ships
+        # that target -- per cross-repo-builds.md.
         run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          dev-exec bash -c '
+            set -euo pipefail
+            cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+            nimble install -y stew results
+            nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
+              -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
+          '
+          echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
 
-      - name: Build
-        run: cargo build --all-targets
-        env:
-          POLKAVM_SANDBOXING_ENABLED: "false"
-          POLKAVM_ALLOW_EXPERIMENTAL: "1"
+      - name: Lint
+        run: dev-exec just lint
 
-      - name: Run tests with zero-test guard
-        env:
-          POLKAVM_SANDBOXING_ENABLED: "false"
-          POLKAVM_ALLOW_EXPERIMENTAL: "1"
-        run: |
-          set -euo pipefail
-          OUTPUT=$(cargo test --all-targets 2>&1) || { echo "$OUTPUT"; exit 1; }
-          echo "$OUTPUT"
-          # Guard against silently empty test suites
-          if ! echo "$OUTPUT" | grep -qP "test result: ok\. [1-9]"; then
-            echo "::error::Zero tests passed — check that test binaries are compiling correctly"
-            exit 1
-          fi
+      - name: Test
+        run: dev-exec just test
 
       - name: Upload test logs on failure
         if: failure()
