@@ -208,12 +208,8 @@ impl PolkaVmTracer {
         // frame instead.  Register + call ``<toplevel>`` explicitly
         // so the synthetic depth-0 frame becomes a real event.  The
         // matching ``register_return`` is emitted in finish_trace.
-        let toplevel_fn = TraceWriter::ensure_function_id(
-            &mut *tracer.writer,
-            "<toplevel>",
-            blob_path,
-            Line(1),
-        );
+        let toplevel_fn =
+            TraceWriter::ensure_function_id(&mut *tracer.writer, "<toplevel>", blob_path, Line(1));
         TraceWriter::register_call(&mut *tracer.writer, toplevel_fn, vec![]);
 
         // Register the "u32/u64" type for register values.
