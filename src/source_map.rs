@@ -13,6 +13,12 @@ use polkavm_common::program::ProgramCounter;
 struct SourceLocation {
     path: PathBuf,
     line: u32,
+    /// Column from DWARF (1-based) when the debug-line program supplied
+    /// it.  `None` when DWARF carried only file+line (e.g. `-g1` builds
+    /// or compilers that don't emit column tables).  Forwarded as-is to
+    /// `register_step_with_column`; the writer treats `None` as "no
+    /// column info" and emits a column-less step.
+    column: Option<u32>,
 }
 
 /// Maps PolkaVM program counters to source file locations.
@@ -50,8 +56,21 @@ impl SourceMapper {
                                 .map(PathBuf::from)
                                 .unwrap_or_default();
                             let line = frame.line().unwrap_or(0);
+                            // Column-aware replay: DWARF's
+                            // `DW_AT_decl_column` lands here when the
+                            // upstream compiler emits it.  PolkaVM's
+                            // `FrameInfo::column()` returns `Some(_)`
+                            // only when the embedded line program uses
+                            // the `Full` source-location variant — for
+                            // line-only entries it returns `None` and
+                            // we forward that downstream so the writer
+                            // emits a column-less step.
+                            let column = frame.column();
                             if line > 0 {
-                                locations.insert(pc.0, SourceLocation { path, line });
+                                locations.insert(
+                                    pc.0,
+                                    SourceLocation { path, line, column },
+                                );
                             }
                         }
                         break;
@@ -79,9 +98,37 @@ impl SourceMapper {
             .map(|loc| (loc.path.as_path(), loc.line))
     }
 
+    /// Resolve a program counter to `(path, line, column)`.
+    ///
+    /// `column` is `Some(_)` when DWARF carried a 1-based column for
+    /// this PC and `None` otherwise (line-only debug info, or the
+    /// upstream compiler simply didn't emit column tables — see
+    /// `polkavm-common::program::SourceLocation::column`).  Used by
+    /// the column-aware step path in `tracer.rs`.
+    pub fn resolve_with_column(&self, pc: ProgramCounter) -> Option<(&Path, u32, Option<u32>)> {
+        self.locations
+            .get(&pc.0)
+            .map(|loc| (loc.path.as_path(), loc.line, loc.column))
+    }
+
     /// Returns the number of cached source locations.
     pub fn location_count(&self) -> usize {
         self.locations.len()
+    }
+
+    /// Iterate over every distinct source path the mapper has cached.
+    /// Used by the tracer to register each path's per-line byte-length
+    /// table with the writer at column-aware mode initialization.
+    pub fn distinct_paths(&self) -> impl Iterator<Item = &Path> {
+        let mut seen: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+        let mut paths: Vec<&Path> = Vec::new();
+        for loc in self.locations.values() {
+            let p: &Path = loc.path.as_path();
+            if seen.insert(p) {
+                paths.push(p);
+            }
+        }
+        paths.into_iter()
     }
 }
 
