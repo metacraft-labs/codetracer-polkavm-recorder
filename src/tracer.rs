@@ -210,6 +210,16 @@ impl PolkaVmTracer {
         // EVM/Solana/Cairo recorders pin.
         TraceWriter::enable_column_aware_steps(&mut *tracer.writer);
 
+        // M-capability-flags: PolkaVM's source resolution is DWARF-
+        // driven, which maps each VM PC to a single statement-start
+        // — column breakpoints and column motions are both well-
+        // defined.  Advertise both capabilities so the GUI exposes
+        // its M6 Alt+click affordance and sub-statement step
+        // controls.  Spec: `internal-files.md` §"Column-Aware
+        // Capability Flags".
+        TraceWriter::enable_column_breakpoints_support(&mut *tracer.writer);
+        TraceWriter::enable_column_motions_support(&mut *tracer.writer);
+
         // Pre-register every DWARF-resolved source path with its
         // per-line UTF-8 byte-length table.  The `paths.dat` Layout A
         // record is required by the column-aware reader to map the
