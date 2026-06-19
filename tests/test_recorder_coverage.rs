@@ -2793,7 +2793,7 @@ fn test_pallet_revive_transfer_via_ct_print_full() {
     // The raw ecalli-index name `ecalli_10` MUST NOT surface — the
     // host_functions resolver must have mapped index 10 to `seal_transfer`.
     assert!(
-        !functions.iter().any(|fname| *fname == "ecalli_10"),
+        !functions.contains(&"ecalli_10"),
         "raw `ecalli_10` must NOT appear in the functions table; the \
          host_functions resolver must canonicalise it to `seal_transfer`; \
          got {:?}",
@@ -3627,7 +3627,7 @@ fn test_pallet_revive_event_test_via_ct_print_full() {
     // host_functions resolver must have mapped index 4 to the
     // canonical `seal_deposit_event` name.
     assert!(
-        !functions.iter().any(|fname| *fname == "ecalli_4"),
+        !functions.contains(&"ecalli_4"),
         "raw `ecalli_4` must NOT appear in the functions table; the \
          host_functions resolver must canonicalise it to \
          `seal_deposit_event`; got {:?}",

@@ -3,8 +3,8 @@
 //! Steps through a PolkaVM program using step tracing and emits
 //! CodeTracer trace events (steps, calls, returns, variables).
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
@@ -196,8 +196,61 @@ impl PolkaVmTracer {
         TraceWriter::begin_writing_trace_events(&mut *tracer.writer, &events_path)
             .map_err(|e| eyre!("{e}"))?;
 
+        // Opt the canonical CTFS writer into column-aware step encoding
+        // *before* the first `register_step` / `start` call.
+        // `enable_column_aware_steps` is sticky for the lifetime of the
+        // trace and gates the writer's `DeltaColumn` (tag 0x07)
+        // emission path plus the `meta.dat` bit 4 flag
+        // (`FLAG_HAS_COLUMN_AWARE_STEPS`).  PolkaVM source paths come
+        // from the embedded DWARF line program (see `SourceMapper`).
+        // When DWARF carries column info we forward it through
+        // `register_step_with_column`; when it doesn't, the writer
+        // still emits the flag and per-step columns surface as `None`
+        // on the read side — exactly the same back-compat contract
+        // EVM/Solana/Cairo recorders pin.
+        TraceWriter::enable_column_aware_steps(&mut *tracer.writer);
+
+        // M-capability-flags: PolkaVM's source resolution is DWARF-
+        // driven, which maps each VM PC to a single statement-start
+        // — column breakpoints and column motions are both well-
+        // defined.  Advertise both capabilities so the GUI exposes
+        // its M6 Alt+click affordance and sub-statement step
+        // controls.  Spec: `internal-files.md` §"Column-Aware
+        // Capability Flags".
+        tracer.writer.enable_column_breakpoints_support();
+        tracer.writer.enable_column_motions_support();
+
+        // Pre-register every DWARF-resolved source path with its
+        // per-line UTF-8 byte-length table.  The `paths.dat` Layout A
+        // record is required by the column-aware reader to map the
+        // writer-side global byte position back to a `(line, column)`
+        // pair.  Files that aren't on disk (or that fail to read)
+        // degrade to an empty length table — the writer treats that
+        // as "no per-line data" and column resolution falls back to
+        // `None` at read time, matching the contract codified in P6.5.
+        // We MUST register paths before `start()` interns the blob
+        // path; otherwise the implicit `start`-time interning would
+        // create a stale paths.dat entry without per-line byte counts.
+        let mut registered_paths: HashSet<PathBuf> = HashSet::new();
+        for path in source_mapper.distinct_paths() {
+            ensure_path_with_line_lengths(&mut *tracer.writer, path, &mut registered_paths);
+        }
+
         // -- 7. Start the trace ----------------------------------------------------------
         TraceWriter::start(&mut *tracer.writer, blob_path, Line(1));
+
+        // Open the synthetic ``<toplevel>`` Call frame.  The CTFS-era
+        // Nim writer's ``trace_writer_start`` only emits a Step --
+        // it does not register the ``<toplevel>`` function or emit a
+        // Call event for it -- so consumers expecting a real
+        // ``<toplevel>`` frame in the calltrace UI (e.g. the
+        // vscode-extension WDIO smoke tests) get an empty outer
+        // frame instead.  Register + call ``<toplevel>`` explicitly
+        // so the synthetic depth-0 frame becomes a real event.  The
+        // matching ``register_return`` is emitted in finish_trace.
+        let toplevel_fn =
+            TraceWriter::ensure_function_id(&mut *tracer.writer, "<toplevel>", blob_path, Line(1));
+        TraceWriter::register_call(&mut *tracer.writer, toplevel_fn, vec![]);
 
         // Register the "u32/u64" type for register values.
         let reg_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "u64");
@@ -261,7 +314,11 @@ impl PolkaVmTracer {
             &variable_info,
             &instruction_at_pc,
             blob_path,
+            &mut registered_paths,
         )?;
+
+        // Close the synthetic ``<toplevel>`` Call frame opened above.
+        TraceWriter::register_return(&mut *tracer.writer, NONE_VALUE);
 
         // -- 9. Finish writing -----------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
@@ -282,11 +339,12 @@ impl PolkaVmTracer {
         variable_info: &DwarfVariableInfo,
         instruction_at_pc: &HashMap<u32, Instruction>,
         blob_path: &Path,
+        registered_paths: &mut HashSet<PathBuf>,
     ) -> Result<()> {
         let reg_type_id = self.reg_type_id.unwrap();
         let args_seq_type_id = self.args_seq_type_id.unwrap();
         let mut step_count: u64 = 0;
-        let mut prev_line: Option<u32> = None;
+        let mut prev_line: Option<(PathBuf, u32, Option<u32>)> = None;
 
         loop {
             let interrupt = instance
@@ -303,19 +361,47 @@ impl PolkaVmTracer {
                         None => continue,
                     };
 
-                    // Try to resolve source location from debug info.
-                    let (source_path, line) = source_mapper
-                        .resolve(pc)
-                        .unwrap_or_else(|| (blob_path, pc.0 + 1));
+                    // Try to resolve source location (path, line, column)
+                    // from the embedded DWARF.  When DWARF is absent we
+                    // synthesize a fallback location pointed at the blob
+                    // path with pc-derived line numbers; columns are
+                    // unknown in that case so we pass `None` — the
+                    // column-aware writer still emits the trace-level
+                    // FlagHasColumnAwareSteps and the step lands at
+                    // column 0 (no DeltaColumn entry) per the M14
+                    // back-compat contract.
+                    let (source_path, line, column) = source_mapper
+                        .resolve_with_column(pc)
+                        .unwrap_or((blob_path, pc.0 + 1, None));
 
-                    // Emit step if line changed.
-                    if prev_line != Some(line) {
-                        TraceWriter::register_step(
+                    // Emit step on (path, line, column) transitions so
+                    // multi-statement source lines surface as distinct
+                    // column-aware steps.  Same-(path, line, column)
+                    // re-entries are deduplicated — matching the EVM
+                    // recorder's behaviour at recorder.rs:691.
+                    let current_loc =
+                        (source_path.to_path_buf(), line, column);
+                    if prev_line.as_ref() != Some(&current_loc) {
+                        // Late path registration: lazy DWARF entries
+                        // (or callers that bypass `from_blob`) may
+                        // introduce a fresh source path mid-trace.
+                        // Register it before emitting the first step
+                        // that references it — the Nim writer's
+                        // first-registration-wins semantics make this
+                        // a no-op on paths already registered up-front
+                        // by `trace_program`.
+                        ensure_path_with_line_lengths(
+                            &mut *self.writer,
+                            source_path,
+                            registered_paths,
+                        );
+                        TraceWriter::register_step_with_column(
                             &mut *self.writer,
                             source_path,
                             Line(line as i64),
+                            column.map(|c| Line(c as i64)),
                         );
-                        prev_line = Some(line);
+                        prev_line = Some(current_loc);
                     }
 
                     // Emit register values as variables, using resolved
@@ -1030,6 +1116,74 @@ impl PolkaVmTracer {
         };
         TraceWriter::register_variable_with_full_value(&mut *self.writer, "args", args_value);
     }
+}
+
+/// Compute the per-line UTF-8 byte-length table required by the
+/// `paths.dat` Layout A record (column-aware mode).
+///
+/// `line_lengths[i]` is the byte count of source line `i+1` (1-based,
+/// matching the CTFS spec), excluding the trailing `\n`.  Files that
+/// don't end with `\n` still have their final line counted.  Files that
+/// can't be read (e.g. DWARF-referenced sources missing from the
+/// recording host) yield an empty `Vec` — the writer treats that as
+/// "no per-line data" and column resolution at read time falls back to
+/// surfacing `None`, matching the back-compat-safe default codified in
+/// P6.5.  Synthetic angle-bracket paths (`<stdin>`, `<unknown>`) are
+/// also treated as empty.
+///
+/// Ported from the Solana recorder's `read_line_lengths_for_path`
+/// (`codetracer-solana-recorder/src/recorder.rs:68`).
+fn read_line_lengths_for_path(path: &Path) -> Vec<u32> {
+    let lossy = path.to_string_lossy();
+    if lossy.is_empty() || (lossy.starts_with('<') && lossy.ends_with('>')) {
+        return Vec::new();
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<u32> = Vec::new();
+    let mut current_len: u32 = 0;
+    for byte in &bytes {
+        if *byte == b'\n' {
+            lines.push(current_len);
+            current_len = 0;
+        } else {
+            current_len = current_len.saturating_add(1);
+        }
+    }
+    if current_len > 0 || bytes.last() != Some(&b'\n') {
+        lines.push(current_len);
+    }
+    lines
+}
+
+/// Register `path` with its per-line UTF-8 byte-length table via the
+/// `paths.dat` Layout A entry point, once per recorder lifetime.
+/// Subsequent calls for the same path are no-ops.
+///
+/// Required by the column-aware mode: the reader maps the writer-side
+/// global byte position back to a `(line, column)` pair using these
+/// tables.  Soft-fails (logged to stderr) if the FFI rejects the call —
+/// the trace remains usable, but columns on that file fall back to
+/// `None` at read time.
+fn ensure_path_with_line_lengths(
+    writer: &mut dyn TraceWriter,
+    path: &Path,
+    registered_paths: &mut HashSet<PathBuf>,
+) {
+    if path.as_os_str().is_empty() || registered_paths.contains(path) {
+        return;
+    }
+    let line_lengths = read_line_lengths_for_path(path);
+    if let Err(err) = TraceWriter::register_path_with_line_lengths(writer, path, &line_lengths) {
+        eprintln!(
+            "[codetracer-polkavm-recorder] register_path_with_line_lengths failed for {}: {} \
+             (column resolution will fall back to None for this file)",
+            path.display(),
+            err,
+        );
+    }
+    registered_paths.insert(path.to_path_buf());
 }
 
 /// Detect a misaligned PolkaVM load/store and emit a

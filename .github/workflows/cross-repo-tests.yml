@@ -13,9 +13,9 @@ name: Cross-Repo Integration Tests
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev, stable]
   push:
-    branches: [main]
+    branches: [main, dev, stable]
 
   workflow_dispatch:
     inputs:
@@ -31,6 +31,9 @@ on:
   repository_dispatch:
     types: [cross-repo-test]
 
+# NIX_CONFIG (with steps.app-token.outputs.token) is set per-job below
+# from a step that runs AFTER the ``Generate CI token`` step -- workflow
+# level can't reference the ``steps`` context.
 env:
   # Use the interpreter backend to avoid Linux sandbox clone() failures on CI runners
   POLKAVM_BACKEND: interpreter
@@ -51,6 +54,13 @@ jobs:
           owner: metacraft-labs
 
       - name: Configure NIX_CONFIG with access-tokens
+        # The original top-level ``env: NIX_CONFIG`` block referenced
+        # ``steps.app-token.outputs.token`` -- but the ``steps`` context
+        # is unavailable at workflow level (the new GitHub Actions
+        # validator rejects the file before any job starts).  Set
+        # ``NIX_CONFIG`` via ``$GITHUB_ENV`` from a step that runs
+        # AFTER ``app-token`` so subsequent ``nix develop`` invocations
+        # can still fetch private flake inputs.
         run: |
           {
             echo 'NIX_CONFIG<<NIX_EOF'
@@ -128,17 +138,38 @@ jobs:
       - name: Clone codetracer
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # ``--shallow-submodules`` shallow-fetches each direct submodule
+        # but does NOT recurse into nested submodules; the codetracer
+        # nix build later fetches ``libs/NimYAML/test/yaml-test-suite``
+        # (NimYAML's own submodule) and aborts with ``does not appear
+        # to be a git repository`` when it's missing.  Drop
+        # ``--shallow-submodules`` and add an explicit recursive
+        # ``submodule update --init`` so every nested .git/ exists.
         run: |
           CT_REF="${{ steps.resolve-refs.outputs.codetracer_ref }}"
           DEST="$GITHUB_WORKSPACE/../codetracer"
           rm -rf "$DEST"
-          git clone --depth 1 --recurse-submodules --shallow-submodules \
+          git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer.git" \
             "$DEST"
           if [ "$CT_REF" != "main" ]; then
             git -C "$DEST" fetch origin "$CT_REF"
             git -C "$DEST" checkout "$CT_REF"
           fi
+          # Initialise every submodule (incl. nested) so the nix build's
+          # internal ``git fetch file://...libs/NimYAML/test/yaml-test-suite``
+          # finds a real repo to read from.  ``|| true`` tolerates the
+          # few submodules whose pinned SHA was force-pushed away.
+          #
+          # ``-c url.<authed>.insteadOf=<unauthed>`` rewrites the
+          # github.com URLs in .gitmodules so private submodules
+          # (e.g. libs/tree-sitter-nim) authenticate via the same
+          # app-token used for the parent clone.  Scoped to this
+          # one invocation so the runner's global config is
+          # untouched.
+          git -C "$DEST" \
+            -c "url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf=https://github.com/" \
+            submodule update --init --recursive --depth 1 || true
 
       - name: Clone codetracer-vscode-extension
         env:
@@ -166,12 +197,93 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/nix-blockchain-development.git" \
             "$DEST"
 
+      - name: Clone codetracer-trace-format as recorder Cargo sibling
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # The recorder's Cargo.toml declares
+        # `codetracer_trace_types` / `codetracer_trace_writer_nim` as
+        # path deps at `../codetracer-trace-format/...`.  Any step
+        # that runs `cargo` against this checkout (the fixture-
+        # recording step shells out to the recorder's nix shell
+        # via `recorder_exec`, which cargo-builds the recorder)
+        # needs the sibling on disk at the same level as the
+        # recorder.
+        run: |
+          PINS="$GITHUB_WORKSPACE/.github/sibling-pins"
+          TF_REF="main"
+          if [ -f "$PINS" ]; then
+            PIN_REF="$(grep '^codetracer-trace-format ' "$PINS" | cut -d' ' -f2)" || true
+            [ -n "$PIN_REF" ] && TF_REF="$PIN_REF"
+          fi
+          DEST="$GITHUB_WORKSPACE/../codetracer-trace-format"
+          rm -rf "$DEST"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git" "$DEST"
+          git -C "$DEST" checkout "$TF_REF"
+
+      - name: Clone codetracer-trace-format-nim as recorder sibling
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # codetracer_trace_writer_nim's build.rs reads the FFI
+        # entry point at
+        # `../codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim`.
+        # The fixture-recording step's recorder_exec cargo-builds
+        # the recorder, which compiles codetracer_trace_writer_nim,
+        # which panics without this sibling on disk.
+        run: |
+          PINS="$GITHUB_WORKSPACE/.github/sibling-pins"
+          TFN_REF="main"
+          if [ -f "$PINS" ]; then
+            PIN_REF="$(grep '^codetracer-trace-format-nim ' "$PINS" | cut -d' ' -f2)" || true
+            [ -n "$PIN_REF" ] && TFN_REF="$PIN_REF"
+          fi
+          DEST="$GITHUB_WORKSPACE/../codetracer-trace-format-nim"
+          rm -rf "$DEST"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git" "$DEST"
+          git -C "$DEST" checkout "$TFN_REF" 2>/dev/null || true
+
+      - name: Clone codetracer-trace-format into codetracer/libs (CI override)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # The codetracer Build step below uses
+        # ``--override-input codetracer-trace-format
+        # path:./libs/codetracer-trace-format``.  The codetracer
+        # checkout doesn't ship that directory, so we clone the
+        # sibling pin into the expected path before nix build.
+        run: |
+          PINS="$GITHUB_WORKSPACE/.github/sibling-pins"
+          TF_REF="main"
+          if [ -f "$PINS" ]; then
+            PIN_REF="$(grep '^codetracer-trace-format ' "$PINS" | cut -d' ' -f2)" || true
+            [ -n "$PIN_REF" ] && TF_REF="$PIN_REF"
+          fi
+          DEST="$GITHUB_WORKSPACE/../codetracer/libs/codetracer-trace-format"
+          rm -rf "$DEST"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git" "$DEST"
+          git -C "$DEST" checkout "$TF_REF"
+
       - name: Build codetracer
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
           OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format"
-          nix build -L ".?submodules=1#codetracer" $OVERRIDE -o result-ct
-          nix build -L ".?submodules=1#db-backend" $OVERRIDE -o result-db
+          # ``metacraft-labs-codetracer.cachix.org`` serves a stale
+          # narinfo for the noir flake input keyed under a NAR-hash
+          # that no longer matches the lockfile, so the build aborts
+          # with ``NAR hash mismatch in input git+https://...noir...``.
+          # Force-skip every non-default substituter (``cache.nixos.org``
+          # alone is plenty for the standard nixpkgs paths) so nix
+          # fetches the noir source from origin and computes the
+          # correct hash itself.  Documented as CI-stabilization §4.
+          SUBST_OVERRIDE="--option accept-flake-config false --option substituters https://cache.nixos.org"
+          # The runner's per-user fetcher cache
+          # (~/.cache/nix/fetcher-cache-v2.sqlite) holds a stale
+          # narinfo for the noir git+https input that contradicts the
+          # lockfile.  ``--refresh`` forces nix to re-resolve every
+          # flake input from origin even when the local cache has an
+          # entry, so the cached narHash gets replaced by what
+          # upstream currently serves.
+          REFRESH="--refresh"
+          nix build $SUBST_OVERRIDE $REFRESH -L ".?submodules=1#codetracer" $OVERRIDE -o result-ct
+          nix build $SUBST_OVERRIDE -L ".?submodules=1#db-backend" $OVERRIDE -o result-db
           # Merge both outputs into a single bin directory so the extension
           # can find both ct and db-backend via a single runnablePath.
           mkdir -p combined-bin

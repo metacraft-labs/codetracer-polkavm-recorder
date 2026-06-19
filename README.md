@@ -46,6 +46,11 @@ inspection, use `ct print` (shipped with
 
 However, you probably want to use it in combination with CodeTracer, which would be released soon.
 
+### Examples
+
+See [`examples/`](examples/README.md) for small PolkaVM programs you
+can record and replay with `ct` to exercise the recorder end-to-end.
+
 ### Architecture
 
 The recorder is organized into the following modules:
