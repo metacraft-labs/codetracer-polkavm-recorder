@@ -217,8 +217,8 @@ impl PolkaVmTracer {
         // its M6 Alt+click affordance and sub-statement step
         // controls.  Spec: `internal-files.md` §"Column-Aware
         // Capability Flags".
-        TraceWriter::enable_column_breakpoints_support(&mut *tracer.writer);
-        TraceWriter::enable_column_motions_support(&mut *tracer.writer);
+        tracer.writer.enable_column_breakpoints_support();
+        tracer.writer.enable_column_motions_support();
 
         // Pre-register every DWARF-resolved source path with its
         // per-line UTF-8 byte-length table.  The `paths.dat` Layout A
