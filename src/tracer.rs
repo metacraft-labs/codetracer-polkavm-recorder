@@ -379,8 +379,7 @@ impl PolkaVmTracer {
                     // column-aware steps.  Same-(path, line, column)
                     // re-entries are deduplicated — matching the EVM
                     // recorder's behaviour at recorder.rs:691.
-                    let current_loc =
-                        (source_path.to_path_buf(), line, column);
+                    let current_loc = (source_path.to_path_buf(), line, column);
                     if prev_line.as_ref() != Some(&current_loc) {
                         // Late path registration: lazy DWARF entries
                         // (or callers that bypass `from_blob`) may
