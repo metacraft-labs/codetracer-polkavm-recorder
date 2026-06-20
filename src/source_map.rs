@@ -67,10 +67,7 @@ impl SourceMapper {
                             // emits a column-less step.
                             let column = frame.column();
                             if line > 0 {
-                                locations.insert(
-                                    pc.0,
-                                    SourceLocation { path, line, column },
-                                );
+                                locations.insert(pc.0, SourceLocation { path, line, column });
                             }
                         }
                         break;
