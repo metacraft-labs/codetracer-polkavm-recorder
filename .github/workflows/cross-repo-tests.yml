@@ -20,13 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       codetracer_ref:
-        description: 'Git ref for codetracer repo'
+        description: "Git ref for codetracer repo"
         required: false
-        default: ''
+        default: ""
       vscode_extension_ref:
-        description: 'Git ref for codetracer-vscode-extension repo'
+        description: "Git ref for codetracer-vscode-extension repo"
         required: false
-        default: ''
+        default: ""
 
   repository_dispatch:
     types: [cross-repo-test]
@@ -73,13 +73,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Nix
-        uses: metacraft-labs/metacraft-github-actions/setup-nix@main
+        uses: metacraft-labs/nixos-modules/.github/setup-nix@main
         with:
-          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          cachix-cache: ''
-          trusted-public-keys: ''
-          substituters: ''
-          gh-token: ${{ steps.app-token.outputs.token }}
+          push-to-cache: false
+          trusted-public-keys: ${{ vars.ATTIC_TRUSTED_PUBLIC_KEY }}
+          substituters: ${{ vars.ATTIC_SUBSTITUTER }}
+          nix-github-token: ${{ steps.app-token.outputs.token }}
 
       - name: Install just
         uses: extractions/setup-just@v2
@@ -197,7 +196,6 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/nix-blockchain-development.git" \
             "$DEST"
-
 
       - name: Clone codetracer-trace-format as recorder Cargo sibling
         env:
