@@ -63,7 +63,27 @@ jobs:
         # apparmor; the test then fails with:
         #   failed to create a sandboxed worker process; run
         #   'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0'
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          set -euo pipefail
+          sysctl_key=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+
+          if [ ! -e "$sysctl_key" ]; then
+            echo "AppArmor unprivileged-userns restriction is not present on this runner."
+            exit 0
+          fi
+
+          if [ "$(cat "$sysctl_key")" = "0" ]; then
+            echo "Unprivileged user namespaces are already allowed."
+            exit 0
+          fi
+
+          if [ -w "$sysctl_key" ]; then
+            echo 0 > "$sysctl_key"
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "Skipping AppArmor unprivileged-userns relaxation; runner does not allow sudo."
+          fi
 
       - name: Test
         run: dev-exec just test
