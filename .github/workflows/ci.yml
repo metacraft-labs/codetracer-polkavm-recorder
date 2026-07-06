@@ -10,6 +10,10 @@ on:
   pull_request:
     branches: [main, dev, stable]
 
+env:
+  POLKAVM_BACKEND: interpreter
+  POLKAVM_ALLOW_EXPERIMENTAL: "1"
+
 jobs:
   lint-and-test:
     name: Lint and test
@@ -19,7 +23,7 @@ jobs:
 
       - name: Generate CI token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
@@ -33,6 +37,11 @@ jobs:
         with:
           env-flavor: nix
           gh-token: ${{ steps.app-token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
 
       - name: Build Nim trace writer library (sibling artifact)
         # TODO: replace with `direnv exec ../codetracer-trace-format-nim
@@ -58,7 +67,27 @@ jobs:
         # apparmor; the test then fails with:
         #   failed to create a sandboxed worker process; run
         #   'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0'
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          set -euo pipefail
+          sysctl_key=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+
+          if [ ! -e "$sysctl_key" ]; then
+            echo "AppArmor unprivileged-userns restriction is not present on this runner."
+            exit 0
+          fi
+
+          if [ "$(cat "$sysctl_key")" = "0" ]; then
+            echo "Unprivileged user namespaces are already allowed."
+            exit 0
+          fi
+
+          if [ -w "$sysctl_key" ]; then
+            echo 0 > "$sysctl_key"
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "Skipping AppArmor unprivileged-userns relaxation; runner does not allow sudo."
+          fi
 
       - name: Test
         run: dev-exec just test
