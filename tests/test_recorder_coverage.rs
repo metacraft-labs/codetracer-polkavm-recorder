@@ -362,7 +362,7 @@ fn test_branching_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "expected only the synthesised entry-point function for the \
          PolkaVM recorder; got {:?}",
         functions
@@ -373,7 +373,7 @@ fn test_branching_via_ct_print_full() {
     // control flow (no `load_imm_and_jump` instructions in this blob).
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "only the entry-point Call(main) is expected for pure-bytecode control flow"
     );
 
@@ -389,7 +389,7 @@ fn test_branching_via_ct_print_full() {
     assert_eq!(counts["steps"].as_u64(), Some(5), "steps; counts={counts}");
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "exactly one call expected: the synthesised entry-point Call(main); counts={counts}"
     );
     assert_eq!(
@@ -494,8 +494,8 @@ fn test_loop_via_ct_print_full() {
     // loop body uses unconditional `jump` and `branch_*`, neither of
     // which the recorder treats as a function-call boundary.
     assert_eq!(
-        calls, 1,
-        "only the entry-point Call(main) is expected; loop branches are not call boundaries; counts={counts}"
+        calls, 2,
+        "only the synthesised <toplevel> frame + the entry-point Call(main) are expected; loop branches are not call boundaries; counts={counts}"
     );
 
     // The loop counter (A0 = arg0 inside `main`) must reach 4 at the
@@ -524,7 +524,7 @@ fn test_loop_via_ct_print_full() {
     // `jump` and `branch_*`, neither of which is a call boundary.
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "only the entry-point Call(main) is expected for a pure-bytecode loop"
     );
 }
@@ -606,6 +606,7 @@ fn test_nested_calls_via_ct_print_full() {
     assert_eq!(
         call_sequence,
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "seal_get_storage".to_string(),
             "seal_set_storage".to_string(),
@@ -619,7 +620,7 @@ fn test_nested_calls_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(5),
+        Some(6),
         "expected exactly 5 call events (entry-point `main` + 4 ecalli); counts={counts}"
     );
 
@@ -737,7 +738,7 @@ fn test_memory_collection_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -892,7 +893,7 @@ fn test_trap_via_ct_print_full() {
     // reached.
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; calls={counts}"
     );
 
@@ -1024,6 +1025,7 @@ fn test_host_calls_via_ct_print_full() {
     // resolved to its pallet-revive name (see src/host_functions.rs).
     let call_sequence = observed_call_sequence(&doc);
     let expected_calls = vec![
+        "<toplevel>".to_string(),
         "main".to_string(),
         "seal_input".to_string(),
         "seal_caller".to_string(),
@@ -1041,7 +1043,7 @@ fn test_host_calls_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(8),
+        Some(9),
         "expected exactly 8 call events (1 entry-point + 7 ecalli); counts={counts}"
     );
 
@@ -1223,13 +1225,13 @@ fn test_branch_family_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "branch_family must register only the entry-point `main`; got {:?}",
         functions
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "branch_family must emit only the entry-point Call(main); a conditional \
          branch is not a function-call boundary"
     );
@@ -1251,7 +1253,7 @@ fn test_branch_family_via_ct_print_full() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the synthesised entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -1378,7 +1380,7 @@ fn test_not_enough_gas_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -1459,7 +1461,7 @@ fn test_divide_by_zero_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -1567,7 +1569,7 @@ fn test_misaligned_access_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -1655,7 +1657,7 @@ fn test_stack_frame_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -1790,6 +1792,7 @@ fn test_pallet_revive_storage_via_ct_print_full() {
     assert_eq!(
         call_sequence,
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "seal_set_storage".to_string(),
             "seal_get_storage".to_string(),
@@ -1804,7 +1807,7 @@ fn test_pallet_revive_storage_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(3),
+        Some(4),
         "expected exactly 3 call events (1 entry-point + 2 ecalli); counts={counts}"
     );
     assert_eq!(
@@ -1957,13 +1960,13 @@ fn test_bitwise_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "bitwise_test must register only the entry-point `main`; got {:?}",
         functions
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "bitwise_test must emit only the entry-point Call(main); a bitwise \
          op is not a function-call boundary"
     );
@@ -1979,7 +1982,7 @@ fn test_bitwise_via_ct_print_full() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the synthesised entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -2237,13 +2240,13 @@ fn test_mul_div_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "mul_div_test must register only the entry-point `main`; got {:?}",
         functions
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "mul_div_test must emit only the entry-point Call(main)"
     );
 
@@ -2257,7 +2260,7 @@ fn test_mul_div_via_ct_print_full() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     // No divisor is zero in this fixture → divide_by_zero arm of the
@@ -2476,14 +2479,14 @@ fn test_memory_load_store_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "memory_load_store_test must register only the entry-point `main`; \
          got {:?}",
         functions
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "memory_load_store_test must emit only the entry-point Call(main)"
     );
 
@@ -2497,7 +2500,7 @@ fn test_memory_load_store_via_ct_print_full() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     // Every store/load offset (0/2/4/8/10) is properly aligned to its
@@ -2629,7 +2632,7 @@ fn test_sbrk_out_of_bounds_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; the segfault \
          termination is not a call boundary; counts={counts}"
     );
@@ -2716,12 +2719,12 @@ fn test_sbrk_out_of_bounds_via_ct_print_full() {
     let call_exits: usize = events.iter().filter(|e| e["kind"] == "call_exit").count();
     let call_entries: usize = events.iter().filter(|e| e["kind"] == "call_entry").count();
     assert_eq!(
-        call_entries, 1,
-        "expected exactly 1 call_entry (the entry-point Call); got {call_entries}"
+        call_entries, 2,
+        "expected exactly 2 call_entry events (<toplevel> + the entry-point Call); got {call_entries}"
     );
     assert_eq!(
-        call_exits, 1,
-        "expected exactly 1 call_exit balancing the entry-point Call; \
+        call_exits, 2,
+        "expected exactly 2 call_exit events balancing <toplevel> + the entry-point Call; \
          the segfault arm must emit register_return; got {call_exits}"
     );
 }
@@ -2804,7 +2807,7 @@ fn test_pallet_revive_transfer_via_ct_print_full() {
     let call_sequence = observed_call_sequence(&doc);
     assert_eq!(
         call_sequence,
-        vec!["main".to_string(), "seal_transfer".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string(), "seal_transfer".to_string()],
         "call_entry events must appear in entry-point + ecalli order with \
          the canonical pallet-revive name"
     );
@@ -2812,7 +2815,7 @@ fn test_pallet_revive_transfer_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(2),
+        Some(3),
         "expected exactly 2 call events (1 entry-point + 1 ecalli); counts={counts}"
     );
     // seal_transfer is intentionally NOT routed onto a special-event
@@ -2952,20 +2955,20 @@ fn test_arith_64_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "arith_64_test must register only the entry-point `main`; got {:?}",
         functions
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "arith_64_test must emit only the entry-point Call(main)"
     );
 
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -3148,13 +3151,13 @@ fn test_ext_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "ext_test must register only the entry-point `main`; got {:?}",
         functions
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "ext_test must emit only the entry-point Call(main)"
     );
 
@@ -3169,7 +3172,7 @@ fn test_ext_test_via_ct_print_full() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -3309,13 +3312,13 @@ fn test_set_less_than_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "set_less_than_test must register only the entry-point `main`; got {:?}",
         functions
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "set_less_than_test must emit only the entry-point Call(main)"
     );
 
@@ -3330,7 +3333,7 @@ fn test_set_less_than_test_via_ct_print_full() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(
@@ -3473,7 +3476,7 @@ fn test_indirect_call_dispatch_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "indirect_call_dispatch_test must register only the entry-point \
          `main`; got {:?}",
         functions
@@ -3493,7 +3496,7 @@ fn test_indirect_call_dispatch_test_via_ct_print_full() {
     // See `src/tracer.rs::run_step_loop` jump_indirect arm.
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "M11 LIMITATION: only the entry-point Call(main) surfaces — the \
          computed dispatch via RA is misclassified as register_return; \
          a future recorder fix that adds proper call-vs-return \
@@ -3501,7 +3504,7 @@ fn test_indirect_call_dispatch_test_via_ct_print_full() {
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "M11 LIMITATION: call_entry sequence is just [main]; the computed \
          dispatch should add a second entry once the recorder supports \
          computed-call detection"
@@ -3524,14 +3527,14 @@ fn test_indirect_call_dispatch_test_via_ct_print_full() {
     let call_exits: usize = events.iter().filter(|e| e["kind"] == "call_exit").count();
     let call_entries: usize = events.iter().filter(|e| e["kind"] == "call_entry").count();
     assert_eq!(
-        call_entries, 1,
-        "expected exactly 1 call_entry (the entry-point Call); got {call_entries}"
+        call_entries, 2,
+        "expected exactly 2 call_entry events (<toplevel> + the entry-point Call); got {call_entries}"
     );
     assert_eq!(
-        call_exits, 1,
-        "expected exactly 1 call_exit (ct-print collapses the multiple \
+        call_exits, 2,
+        "expected exactly 2 call_exit events (ct-print collapses the multiple \
          register_return invocations from the M11 misclassification + \
-         Trap arm onto a single outermost-frame exit); got {call_exits}"
+         Trap arm onto the <toplevel> + entry-point frame exits); got {call_exits}"
     );
 
     // The pre-dispatch sentinel must surface in A0 — proves the
@@ -3638,7 +3641,7 @@ fn test_pallet_revive_event_test_via_ct_print_full() {
     let call_sequence = observed_call_sequence(&doc);
     assert_eq!(
         call_sequence,
-        vec!["main".to_string(), "seal_deposit_event".to_string(),],
+        vec!["<toplevel>".to_string(), "main".to_string(), "seal_deposit_event".to_string(),],
         "call_entry events must appear in entry-point + ecalli order with \
          the canonical pallet-revive name"
     );
@@ -3646,7 +3649,7 @@ fn test_pallet_revive_event_test_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(2),
+        Some(3),
         "expected exactly 2 call events (1 entry-point + 1 ecalli); counts={counts}"
     );
     // Per `src/tracer.rs` Ecalli arm, index 4 is routed onto
@@ -3773,7 +3776,7 @@ fn test_pallet_revive_hash_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main", "seal_hash_blake2_256", "seal_hash_keccak_256"],
+        vec!["<toplevel>", "main", "seal_hash_blake2_256", "seal_hash_keccak_256"],
         "expected EXACT functions table [main, seal_hash_blake2_256, \
          seal_hash_keccak_256] in source order; got {functions:?}"
     );
@@ -3784,6 +3787,7 @@ fn test_pallet_revive_hash_test_via_ct_print_full() {
     assert_eq!(
         call_sequence,
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "seal_hash_blake2_256".to_string(),
             "seal_hash_keccak_256".to_string(),
@@ -3798,7 +3802,7 @@ fn test_pallet_revive_hash_test_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(3),
+        Some(4),
         "expected exactly 3 call events (1 entry-point + 2 ecalli); counts={counts}"
     );
     assert_eq!(
@@ -3926,15 +3930,15 @@ fn test_pallet_revive_cross_contract_call_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main", "seal_call"],
-        "expected EXACT functions table [main, seal_call]; got {functions:?}"
+        vec!["<toplevel>", "main", "seal_call"],
+        "expected EXACT functions table [<toplevel>, main, seal_call]; got {functions:?}"
     );
 
     // Call sequence: entry-point Call(main) + Call(seal_call).
     let call_sequence = observed_call_sequence(&doc);
     assert_eq!(
         call_sequence,
-        vec!["main".to_string(), "seal_call".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string(), "seal_call".to_string()],
         "call_entry events must appear in entry-point + ecalli order with \
          the canonical pallet-revive name"
     );
@@ -3942,7 +3946,7 @@ fn test_pallet_revive_cross_contract_call_test_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(2),
+        Some(3),
         "expected exactly 2 call events (1 entry-point + 1 ecalli); counts={counts}"
     );
     assert_eq!(
@@ -4076,13 +4080,13 @@ fn test_move_reg_and_load_imm_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "move_reg_and_load_imm_test must register only the entry-point \
          `main`; got {functions:?}"
     );
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string()],
+        vec!["<toplevel>".to_string(), "main".to_string()],
         "move_reg_and_load_imm_test must emit only the entry-point Call(main)"
     );
 
@@ -4098,7 +4102,7 @@ fn test_move_reg_and_load_imm_test_via_ct_print_full() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "only the entry-point Call(main) is expected; counts={counts}"
     );
     assert_eq!(

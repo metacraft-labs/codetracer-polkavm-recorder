@@ -338,7 +338,7 @@ fn test_recorded_trace_via_ct_print_json() {
         .collect();
     assert_eq!(
         functions,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "expected only the synthesised entry-point function for the \
          PolkaVM recorder; got {:?} — if DWARF function-name resolution \
          has landed, extend this test to assert on the resolved names \
@@ -361,7 +361,7 @@ fn test_recorded_trace_via_ct_print_json() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(1),
+        Some(2),
         "expected exactly 1 call event (the synthesised entry-point \
          Call(main)); counts={counts}",
     );
@@ -381,7 +381,7 @@ fn test_recorded_trace_via_ct_print_json() {
         .collect();
     assert_eq!(
         call_sequence,
-        vec!["main"],
+        vec!["<toplevel>", "main"],
         "expected only the synthesised entry-point Call(main) for the \
          PolkaVM recorder; got {:?} — if DWARF-driven call-frame \
          synthesis has landed, extend this test to verify the call \
