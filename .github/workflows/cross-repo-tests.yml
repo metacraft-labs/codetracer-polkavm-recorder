@@ -213,5 +213,18 @@ jobs:
         with:
           name: wdio-polkavm-diagnostics
           path: wdio-diagnostics/
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: ignore
+
+      - name: Mirror diagnostics to S3 (non-blocking)
+        if: failure()
+        continue-on-error: true
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        with:
+          path: wdio-diagnostics/
+          prefix: wdio-polkavm-diagnostics/${{ github.run_id }}
+          endpoint: ${{ vars.MCL_S3_ARTIFACTS_ENDPOINT }}
+          bucket: ${{ vars.MCL_S3_ARTIFACTS_BUCKET }}
+          region: ${{ vars.MCL_S3_ARTIFACTS_REGION }}
+          access-key-id: ${{ secrets.MCL_S3_ARTIFACTS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MCL_S3_ARTIFACTS_SECRET_ACCESS_KEY }}
