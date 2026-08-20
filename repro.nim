@@ -115,6 +115,11 @@ package codetracer_polkavm_recorder:
     # the same ``bash tests/verify-cli-convention-no-silent-skip.sh``
     # step ``just test`` runs after ``cargo test``.
     "sh"
+    # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
+    # Windows-guarded because Chocolatey is a Windows package manager with no
+    # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.
+    when defined(windows):
+      "chocolatey"
 
   executable codetracerPolkavmRecorder:
     name: "codetracer-polkavm-recorder"
