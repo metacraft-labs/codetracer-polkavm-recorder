@@ -37,7 +37,7 @@ jobs:
         # setup-dev-env clones the siblings listed in .github/sibling-repos
         # (codetracer-trace-format, codetracer-trace-format-nim) at the
         # workspace-lock-pinned revisions before materialising the nix env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: nix
           gh-token: ${{ steps.app-token.outputs.token }}
@@ -107,7 +107,7 @@ jobs:
       - name: Mirror test logs to S3 (non-blocking)
         if: failure()
         continue-on-error: true
-        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@main
+        uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@dev
         with:
           path: target/
           prefix: test-logs-${{ matrix.runner }}/${{ github.run_id }}
