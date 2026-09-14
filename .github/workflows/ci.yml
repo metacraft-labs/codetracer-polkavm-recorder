@@ -16,7 +16,7 @@ env:
 
 jobs:
   lint-and-test:
-    name: Lint and test (${{ matrix.runner }})
+    name: Lint and test (${{ join(matrix.runner, '-') }})
     strategy:
       fail-fast: false
       matrix:
@@ -100,7 +100,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs-${{ matrix.runner }}
+          name: test-logs-${{ join(matrix.runner, '-') }}
           path: target/
           retention-days: 1
 
@@ -110,7 +110,7 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/mirror-artifacts-s3@dev
         with:
           path: target/
-          prefix: test-logs-${{ matrix.runner }}/${{ github.run_id }}
+          prefix: test-logs-${{ join(matrix.runner, '-') }}/${{ github.run_id }}
           endpoint: ${{ vars.MCL_S3_ARTIFACTS_ENDPOINT }}
           bucket: ${{ vars.MCL_S3_ARTIFACTS_BUCKET }}
           region: ${{ vars.MCL_S3_ARTIFACTS_REGION }}
