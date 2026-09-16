@@ -12,6 +12,8 @@ use std::path::Path;
 use polkavm_common::program::{InstructionSetKind, Reg::*, asm};
 use polkavm_common::writer::ProgramBlobBuilder;
 
+use codetracer_trace_types::{TraceLowLevelEvent, ValueRecord};
+
 /// Helper: create a simple PolkaVM program blob that adds two numbers.
 ///
 /// The program loads two immediates into registers, adds them,
@@ -68,11 +70,9 @@ fn create_compute_program_blob() -> Vec<u8> {
 
 /// Helper: write a blob to a temp file and run the tracer on it.
 ///
-/// The recorder is CTFS-only — `record` takes no format parameter.  The
-/// fixture-export and event-shape tests below use this helper and then
-/// either inspect the produced `.ct` container (CTFS magic check) or
-/// skip detailed JSON shape inspection (the legacy `--format json`
-/// readback path no longer exists).
+/// The recorder is CTFS-only — `record` takes no format parameter.  The tests
+/// below use this helper and then decode the produced `.ct` container with
+/// `load_trace_events`.
 fn run_tracer_on_blob(blob_bytes: &[u8], out_dir: &Path) {
     let blob_path = out_dir.join("test_program.polkavm");
     std::fs::write(&blob_path, blob_bytes).expect("failed to write blob");
@@ -81,8 +81,8 @@ fn run_tracer_on_blob(blob_bytes: &[u8], out_dir: &Path) {
         .expect("trace_program should succeed");
 }
 
-/// Helper: verify .ct output and return empty vec (CTFS format, no JSON reader).
-fn load_trace_events(out_dir: &Path) -> Vec<serde_json::Value> {
+/// Helper: verify the `.ct` output and decode it into typed trace events.
+fn load_trace_events(out_dir: &Path) -> Vec<TraceLowLevelEvent> {
     let ct_files: Vec<_> = std::fs::read_dir(out_dir)
         .expect("failed to read output directory")
         .filter_map(|e| e.ok())
@@ -97,43 +97,77 @@ fn load_trace_events(out_dir: &Path) -> Vec<serde_json::Value> {
         &[0xC0u8, 0xDE, 0x72, 0xAC, 0xE2],
         "CTFS magic"
     );
-    vec![]
+
+    let events = codetracer_trace_reader::ctfs_reader::read_trace_from_ctfs(&ct_files[0])
+        .unwrap_or_else(|error| {
+            panic!(
+                "read back {} — the recorder wrote it, so this reader must be able to \
+                 decode it: {error}",
+                ct_files[0].display()
+            )
+        });
+    assert!(
+        !events.is_empty(),
+        "the recorder produced {} but it decoded to no events at all",
+        ct_files[0].display()
+    );
+
+    events
 }
 
 /// Helper: collect all Int values from Value events in the trace.
 /// Returns a vec of (variable_id, i64_value) pairs.
-fn collect_int_values(events: &[serde_json::Value]) -> Vec<(i64, i64)> {
+fn collect_int_values(events: &[TraceLowLevelEvent]) -> Vec<(usize, i64)> {
     events
         .iter()
-        .filter_map(|e| {
-            let val = e.get("Value")?;
-            let variable_id = val.get("variable_id")?.as_i64()?;
-            let value = val.get("value")?;
-            if value.get("kind").and_then(|k| k.as_str()) == Some("Int") {
-                let i = value.get("i").and_then(|v| v.as_i64())?;
-                Some((variable_id, i))
-            } else {
-                None
-            }
+        .filter_map(|e| match e {
+            TraceLowLevelEvent::Value(full) => match full.value {
+                ValueRecord::Int { i, .. } => Some((full.variable_id.0, i)),
+                _ => None,
+            },
+            _ => None,
         })
         .collect()
 }
 
 /// Helper: collect all VariableName events and build a map from variable_id to name.
 /// Variable IDs are assigned sequentially starting from 0 in the order VariableName events appear.
-fn collect_variable_names(events: &[serde_json::Value]) -> Vec<String> {
+fn collect_variable_names(events: &[TraceLowLevelEvent]) -> Vec<String> {
     events
         .iter()
-        .filter_map(|e| {
-            e.get("VariableName")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+        .filter_map(|e| match e {
+            TraceLowLevelEvent::VariableName(n) | TraceLowLevelEvent::Variable(n) => {
+                Some(n.clone())
+            }
+            _ => None,
         })
         .collect()
 }
 
+/// Helper: count the events matching a single-variant predicate.
+fn count_steps(events: &[TraceLowLevelEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, TraceLowLevelEvent::Step(_)))
+        .count()
+}
+
+fn count_calls(events: &[TraceLowLevelEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, TraceLowLevelEvent::Call(_)))
+        .count()
+}
+
+fn count_returns(events: &[TraceLowLevelEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, TraceLowLevelEvent::Return(_)))
+        .count()
+}
+
 /// Helper: find all Int values for a given register name across the trace.
-fn find_register_values(events: &[serde_json::Value], register_name: &str) -> Vec<i64> {
+fn find_register_values(events: &[TraceLowLevelEvent], register_name: &str) -> Vec<i64> {
     let var_names = collect_variable_names(events);
     let var_id = var_names.iter().position(|name| name == register_name);
 
@@ -142,7 +176,7 @@ fn find_register_values(events: &[serde_json::Value], register_name: &str) -> Ve
             let int_values = collect_int_values(events);
             int_values
                 .iter()
-                .filter(|(vid, _)| *vid == id as i64)
+                .filter(|(vid, _)| *vid == id)
                 .map(|(_, v)| *v)
                 .collect()
         }
@@ -165,13 +199,10 @@ fn test_polkavm_tracer_basic_execution() {
 
     // Verify .ct output.
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
     assert!(!events.is_empty(), "trace should have at least one event");
 
     // There should be Step events (actual execution was recorded).
-    let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
+    let step_count = count_steps(&events);
     assert!(
         step_count > 0,
         "trace should contain at least one Step event, got none"
@@ -185,7 +216,10 @@ fn test_polkavm_tracer_basic_execution() {
     );
 
     // There should be Value events (register values were recorded).
-    let value_count = events.iter().filter(|e| e.get("Value").is_some()).count();
+    let value_count = events
+        .iter()
+        .filter(|e| matches!(e, TraceLowLevelEvent::Value(_)))
+        .count();
     assert!(
         value_count > 0,
         "trace should contain Value events for register values"
@@ -206,9 +240,6 @@ fn test_polkavm_compute_value_at_return() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // The compute program calculates: (10 + 32) * 2 + 10 = 94
     // At the end, arg0 (A0) should contain 94.
@@ -265,9 +296,6 @@ fn test_polkavm_register_values_captured() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // The add program: arg0 = 10, arg1 = 32, arg0 = arg0 + arg1 = 42
     // (A0/A1 are renamed to arg0/arg1 within the "main" function scope)
@@ -320,12 +348,9 @@ fn test_polkavm_step_count_reasonable() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // Count Step events in the trace.
-    let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
+    let step_count = count_steps(&events);
 
     // The add program has 4 instructions (load_imm, load_imm, add_32, ret).
     // Step count should be reasonable: at least 1, at most 50.
@@ -340,16 +365,23 @@ fn test_polkavm_step_count_reasonable() {
         step_count
     );
 
-    // Verify step events have valid structure (path_id and line fields).
-    for event in events.iter().filter(|e| e.get("Step").is_some()) {
-        let step = event.get("Step").unwrap();
+    // Verify step events have valid structure: each one names a path that the
+    // trace interned, and a positive line.
+    let path_count = events
+        .iter()
+        .filter(|e| matches!(e, TraceLowLevelEvent::Path(_)))
+        .count();
+    for event in &events {
+        let TraceLowLevelEvent::Step(step) = event else {
+            continue;
+        };
         assert!(
-            step.get("path_id").is_some(),
-            "Step event should have path_id field"
+            step.path_id.0 < path_count,
+            "Step path_id {} should name one of the {} interned Path events",
+            step.path_id.0,
+            path_count
         );
-        let line = step["line"]
-            .as_i64()
-            .expect("Step line should be an integer");
+        let line = step.line.0;
         assert!(line > 0, "Step line should be positive, got {}", line);
     }
 }
@@ -374,7 +406,7 @@ fn test_polkavm_metadata_has_required_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: trace_paths.json content validation
+// Test 6: interned source paths
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -386,9 +418,27 @@ fn test_polkavm_tracer_paths_valid() {
     let blob = create_add_program_blob();
     run_tracer_on_blob(&blob, &out_dir);
 
-    // Paths are embedded in the .ct file; verify .ct exists.
+    // Paths are interned as Path events inside the `.ct` container rather than
+    // listed in a sidecar file.
     let events = load_trace_events(&out_dir);
-    let _ = events;
+    let paths: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceLowLevelEvent::Path(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !paths.is_empty(),
+        "the trace should intern at least one source path"
+    );
+    for path in &paths {
+        assert!(
+            !path.as_os_str().is_empty(),
+            "an interned path should not be empty, got paths: {:?}",
+            paths
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,9 +455,6 @@ fn test_polkavm_register_names_emitted() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
     let var_names = collect_variable_names(&events);
 
     // The tracer emits resolved variable names when debug info is available.
@@ -440,17 +487,10 @@ fn test_polkavm_function_entry_exit() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // The tracer emits a Return event when execution finishes.
-    let return_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e.get("Return").is_some())
-        .collect();
     assert!(
-        !return_events.is_empty(),
+        count_returns(&events) > 0,
         "trace should contain at least one Return event"
     );
 
@@ -459,14 +499,11 @@ fn test_polkavm_function_entry_exit() {
     // Find the index of the last Return event.
     let last_return_idx = events
         .iter()
-        .rposition(|e| e.get("Return").is_some())
+        .rposition(|e| matches!(e, TraceLowLevelEvent::Return(_)))
         .expect("should have a Return event");
 
     // No Step events should come after the Return.
-    let steps_after_return = events[last_return_idx + 1..]
-        .iter()
-        .filter(|e| e.get("Step").is_some())
-        .count();
+    let steps_after_return = count_steps(&events[last_return_idx + 1..]);
     assert_eq!(
         steps_after_return, 0,
         "no Step events should appear after the final Return"
@@ -491,9 +528,6 @@ fn test_polkavm_tracer_compute_program() {
     // metadata/paths embedded in .ct
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
     assert!(!events.is_empty(), "compute program should produce events");
 
     // Collect all Int values across all Value events.
@@ -552,12 +586,9 @@ fn test_polkavm_cli_record_with_blob() {
 
     // Also verify the CLI-produced trace has actual content (not just empty files).
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
     assert!(!events.is_empty(), "CLI trace should have events");
 
-    let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
+    let step_count = count_steps(&events);
     assert!(step_count > 0, "CLI trace should contain Step events");
 
     // Verify register values were captured through CLI too.
@@ -584,9 +615,6 @@ fn test_polkavm_variable_names_resolved() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
     let var_names = collect_variable_names(&events);
 
     // Within the "main" function, A0-A5 should be renamed to arg0-arg5.
@@ -645,9 +673,6 @@ fn test_polkavm_variable_values_via_resolved_names() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // The compute program: arg0 = 10, arg1 = 32, S0 = 42, S1 = 84, arg0 = 94
     let arg0_values = find_register_values(&events, "arg0");
@@ -724,24 +749,16 @@ fn test_ecalli_generates_call_and_return_events() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // There should be a Call event with function name "seal_input".
-    let call_events: Vec<&serde_json::Value> =
-        events.iter().filter(|e| e.get("Call").is_some()).collect();
     assert!(
-        !call_events.is_empty(),
+        count_calls(&events) > 0,
         "trace should contain a Call event for the ecalli, got events: {:?}",
         events
-            .iter()
-            .map(|e| e.as_object().unwrap().keys().next().unwrap().clone())
-            .collect::<Vec<_>>()
     );
 
     // There should be Return events (at least one from the ecalli, one from program end).
-    let return_count = events.iter().filter(|e| e.get("Return").is_some()).count();
+    let return_count = count_returns(&events);
     assert!(
         return_count >= 2,
         "should have at least 2 Return events (one for ecalli, one for program end), got {}",
@@ -772,15 +789,10 @@ fn test_unknown_ecalli_halts_execution() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // A Call event should still be emitted for the unknown ecalli.
-    let call_events: Vec<&serde_json::Value> =
-        events.iter().filter(|e| e.get("Call").is_some()).collect();
     assert!(
-        !call_events.is_empty(),
+        count_calls(&events) > 0,
         "trace should contain a Call event even for unknown ecalli"
     );
 
@@ -826,13 +838,10 @@ fn test_multiple_ecalli_calls() {
     run_tracer_on_blob(&blob, &out_dir);
 
     let events = load_trace_events(&out_dir);
-    if events.is_empty() {
-        return;
-    }
 
     // Should have at least 3 Call events for the ecalli calls
     // (there may also be a Call for "main" from the trace start).
-    let call_count = events.iter().filter(|e| e.get("Call").is_some()).count();
+    let call_count = count_calls(&events);
     assert!(
         call_count >= 3,
         "should have at least 3 Call events for 3 ecalli calls, got {}",
@@ -840,7 +849,7 @@ fn test_multiple_ecalli_calls() {
     );
 
     // Should have at least 4 Return events (3 from ecalli + 1 from program end).
-    let return_count = events.iter().filter(|e| e.get("Return").is_some()).count();
+    let return_count = count_returns(&events);
     assert!(
         return_count >= 4,
         "should have at least 4 Return events (3 ecalli + 1 program end), got {}",

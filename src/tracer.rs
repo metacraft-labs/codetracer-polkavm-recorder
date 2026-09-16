@@ -237,20 +237,13 @@ impl PolkaVmTracer {
         }
 
         // -- 7. Start the trace ----------------------------------------------------------
+        // ``start`` registers the ``<toplevel>`` function, opens its call frame
+        // and emits the entry step — all three, per ``trace-events.md``
+        // §"Recorder Integration — Starting a Recording".  Consumers that draw
+        // the calltrace (the vscode-extension WDIO smoke tests among them) need
+        // that depth-0 frame to be a real event, and it is.  The matching
+        // ``register_return`` is emitted in finish_trace.
         TraceWriter::start(&mut *tracer.writer, blob_path, Line(1));
-
-        // Open the synthetic ``<toplevel>`` Call frame.  The CTFS-era
-        // Nim writer's ``trace_writer_start`` only emits a Step --
-        // it does not register the ``<toplevel>`` function or emit a
-        // Call event for it -- so consumers expecting a real
-        // ``<toplevel>`` frame in the calltrace UI (e.g. the
-        // vscode-extension WDIO smoke tests) get an empty outer
-        // frame instead.  Register + call ``<toplevel>`` explicitly
-        // so the synthetic depth-0 frame becomes a real event.  The
-        // matching ``register_return`` is emitted in finish_trace.
-        let toplevel_fn =
-            TraceWriter::ensure_function_id(&mut *tracer.writer, "<toplevel>", blob_path, Line(1));
-        TraceWriter::register_call(&mut *tracer.writer, toplevel_fn, vec![]);
 
         // Register the "u32/u64" type for register values.
         let reg_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "u64");

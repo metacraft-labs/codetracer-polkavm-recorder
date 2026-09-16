@@ -2807,7 +2807,11 @@ fn test_pallet_revive_transfer_via_ct_print_full() {
     let call_sequence = observed_call_sequence(&doc);
     assert_eq!(
         call_sequence,
-        vec!["<toplevel>".to_string(), "main".to_string(), "seal_transfer".to_string()],
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "seal_transfer".to_string()
+        ],
         "call_entry events must appear in entry-point + ecalli order with \
          the canonical pallet-revive name"
     );
@@ -3641,7 +3645,11 @@ fn test_pallet_revive_event_test_via_ct_print_full() {
     let call_sequence = observed_call_sequence(&doc);
     assert_eq!(
         call_sequence,
-        vec!["<toplevel>".to_string(), "main".to_string(), "seal_deposit_event".to_string(),],
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "seal_deposit_event".to_string(),
+        ],
         "call_entry events must appear in entry-point + ecalli order with \
          the canonical pallet-revive name"
     );
@@ -3776,7 +3784,12 @@ fn test_pallet_revive_hash_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["<toplevel>", "main", "seal_hash_blake2_256", "seal_hash_keccak_256"],
+        vec![
+            "<toplevel>",
+            "main",
+            "seal_hash_blake2_256",
+            "seal_hash_keccak_256"
+        ],
         "expected EXACT functions table [main, seal_hash_blake2_256, \
          seal_hash_keccak_256] in source order; got {functions:?}"
     );
@@ -3938,7 +3951,11 @@ fn test_pallet_revive_cross_contract_call_test_via_ct_print_full() {
     let call_sequence = observed_call_sequence(&doc);
     assert_eq!(
         call_sequence,
-        vec!["<toplevel>".to_string(), "main".to_string(), "seal_call".to_string()],
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "seal_call".to_string()
+        ],
         "call_entry events must appear in entry-point + ecalli order with \
          the canonical pallet-revive name"
     );
