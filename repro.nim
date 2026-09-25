@@ -76,6 +76,7 @@
 ## program blobs (RISC-V bytecode) and decode them via ``ct-print``.
 
 import repro_project_dsl
+import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
 
 package codetracer_polkavm_recorder:
@@ -125,6 +126,9 @@ package codetracer_polkavm_recorder:
     name: "codetracer-polkavm-recorder"
 
   devEnv:
+    when not defined(windows):
+      useFlakeDevShell()
+
     activity "default"
 
   build:
