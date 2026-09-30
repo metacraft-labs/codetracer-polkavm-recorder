@@ -57,21 +57,19 @@ fn ct_print_path() -> PathBuf {
         .join(format!("ct-print{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// Skip-helper: returns `Some(path)` to ct-print or logs a clear
-/// `SKIP:` diagnostic and returns `None`.  Matches the convention
-/// enforced by `verify-cli-convention-no-silent-skip.sh`.
-fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
+/// Path to ct-print, which every `_via_ct_print_*` test decodes its trace
+/// with. A missing binary fails the test: skipping would turn each of those
+/// tests into a pass that asserted nothing. Build it in the sibling with
+/// `nimble buildCtPrint` (CI does this before `just test`).
+fn require_ct_print(test_name: &str) -> PathBuf {
     let p = ct_print_path();
-    if !p.exists() {
-        eprintln!(
-            "SKIP: {test_name} requires ct-print at {} — only available \
-             within the metacraft workspace where codetracer-trace-format-nim \
-             is a sibling.",
-            p.display()
-        );
-        return None;
-    }
-    Some(p)
+    assert!(
+        p.exists(),
+        "{test_name} requires ct-print at {} (build it in the sibling \
+         codetracer-trace-format-nim checkout with `nimble buildCtPrint`)",
+        p.display()
+    );
+    p
 }
 
 /// Build a tiny PolkaVM blob exercising a couple of source-line
@@ -94,8 +92,8 @@ fn tiny_blob() -> Vec<u8> {
     builder.into_vec().expect("failed to build program blob")
 }
 
-fn record_and_dump(test_name: &str, blob_basename: &str) -> Option<(serde_json::Value, PathBuf)> {
-    let ct_print = ct_print_or_skip(test_name)?;
+fn record_and_dump(test_name: &str, blob_basename: &str) -> (serde_json::Value, PathBuf) {
+    let ct_print = require_ct_print(test_name);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let blob_path = tmp.path().join(format!("{blob_basename}.polkavm"));
@@ -134,7 +132,7 @@ fn record_and_dump(test_name: &str, blob_basename: &str) -> Option<(serde_json::
 
     let owned_path = blob_path.clone();
     drop(tmp);
-    Some((doc, owned_path))
+    (doc, owned_path)
 }
 
 /// Asserts the trace advertises column-aware support and that step
@@ -144,9 +142,7 @@ fn record_and_dump(test_name: &str, blob_basename: &str) -> Option<(serde_json::
 #[test]
 fn test_column_aware_flag_set_even_without_dwarf_columns() {
     let test_name = "test_column_aware_flag_set_even_without_dwarf_columns";
-    let Some((doc, source_path)) = record_and_dump(test_name, "column_aware_no_dwarf") else {
-        return;
-    };
+    let (doc, source_path) = record_and_dump(test_name, "column_aware_no_dwarf");
 
     // --- meta.dat bit 4: FLAG_HAS_COLUMN_AWARE_STEPS ---
     // The trace metadata must advertise column-aware support because
@@ -364,9 +360,7 @@ fn build_multi_stmt_blob(source_path: &str, source_line: u32, columns: [u32; 3])
 #[test]
 fn test_multi_statements_one_line_surface_distinct_columns() {
     let test_name = "test_multi_statements_one_line_surface_distinct_columns";
-    let Some(ct_print) = ct_print_or_skip(test_name) else {
-        return;
-    };
+    let ct_print = require_ct_print(test_name);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     // Real on-disk source fixture: the per-line UTF-8 byte-length table
