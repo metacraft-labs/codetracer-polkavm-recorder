@@ -6,8 +6,8 @@
 //! 2. **`ct print` content** — record a fixture and pipe the resulting
 //!    `.ct` container through `ct-print --json` from
 //!    `codetracer-trace-format-nim` to make content-level assertions.
-//!    Skips gracefully when `ct-print` is not present (i.e. when this
-//!    crate is built outside the metacraft workspace).
+//!    Fails when `ct-print` is not present: it must be built in the
+//!    sibling checkout (`nimble buildCtPrint`), as CI does.
 //! 3. **CLI env-var contract** — exercise the post-2026-05-08
 //!    `CODETRACER_POLKAVM_RECORDER_OUT_DIR` /
 //!    `CODETRACER_POLKAVM_RECORDER_DISABLED` env vars and the
@@ -198,14 +198,12 @@ fn test_record_invalid_blob() {
 #[test]
 fn test_recorded_trace_via_ct_print_json() {
     let ct_print = ct_print_path();
-    if !ct_print.exists() {
-        eprintln!(
-            "SKIP: ct-print not found at {} — only available within the \
-             metacraft workspace where codetracer-trace-format-nim is a sibling.",
-            ct_print.display()
-        );
-        return;
-    }
+    assert!(
+        ct_print.exists(),
+        "ct-print not found at {} (build it in the sibling \
+         codetracer-trace-format-nim checkout with `nimble buildCtPrint`)",
+        ct_print.display()
+    );
 
     let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let out_dir = tmp_dir.path().join("traces");
