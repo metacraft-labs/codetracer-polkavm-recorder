@@ -89,6 +89,13 @@ package codetracer_polkavm_recorder:
     # supplies the same versions.
     "rustc >=1.85"
     "cargo >=1.85"
+    # C compiler driver — rustc links through `cc`, and build scripts
+    # (cc-rs, the Nim FFI) compile C. Declaring it puts its directory on
+    # every cargo edge's PATH. Windows links with MSVC instead.
+    when defined(linux):
+      "gcc"
+    elif defined(macosx):
+      "clang"
 
     # Nim toolchain — the sibling ``codetracer_trace_writer_nim`` crate's
     # build.rs compiles a Nim FFI static library at cargo build time via
