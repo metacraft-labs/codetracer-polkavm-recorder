@@ -49,22 +49,19 @@ fn ct_print_path() -> PathBuf {
         .join(format!("ct-print{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// Skip-helper: returns `Some(path)` to ct-print or logs a clear
-/// `SKIP:` diagnostic and returns `None`.  The
-/// `verify-cli-convention-no-silent-skip.sh` script greps for the
-/// literal `SKIP:` token, so silent skips remain forbidden.
-fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
+/// Path to ct-print, which every `_via_ct_print_*` test decodes its trace
+/// with. A missing binary fails the test: skipping would turn each of those
+/// tests into a pass that asserted nothing. Build it in the sibling with
+/// `nimble buildCtPrint` (CI does this before `just test`).
+fn require_ct_print(test_name: &str) -> PathBuf {
     let p = ct_print_path();
-    if !p.exists() {
-        eprintln!(
-            "SKIP: {test_name} requires ct-print at {} — only available \
-             within the metacraft workspace where codetracer-trace-format-nim \
-             is a sibling.",
-            p.display()
-        );
-        return None;
-    }
-    Some(p)
+    assert!(
+        p.exists(),
+        "{test_name} requires ct-print at {} (build it in the sibling \
+         codetracer-trace-format-nim checkout with `nimble buildCtPrint`)",
+        p.display()
+    );
+    p
 }
 
 /// Build a PolkaVM program blob from a list of instructions for the
@@ -86,13 +83,11 @@ fn build_blob_with_isa(code: &[Instruction], isa: InstructionSetKind) -> Vec<u8>
 
 /// Record a programmatic blob into a fresh temp dir, then run
 /// `ct-print --full --strip-paths` and return the decoded JSON.
-/// Returns `None` when ct-print is unavailable (the caller has
-/// already emitted a `SKIP:` line via `ct_print_or_skip`).
 fn record_and_dump_full(
     test_name: &str,
     blob_basename: &str,
     code: &[Instruction],
-) -> Option<(serde_json::Value, PathBuf)> {
+) -> (serde_json::Value, PathBuf) {
     record_and_dump_full_with_isa(test_name, blob_basename, code, InstructionSetKind::Latest32)
 }
 
@@ -105,8 +100,8 @@ fn record_and_dump_full_with_isa(
     blob_basename: &str,
     code: &[Instruction],
     isa: InstructionSetKind,
-) -> Option<(serde_json::Value, PathBuf)> {
-    let ct_print = ct_print_or_skip(test_name)?;
+) -> (serde_json::Value, PathBuf) {
+    let ct_print = require_ct_print(test_name);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let blob_path = tmp.path().join(format!("{blob_basename}.polkavm"));
@@ -146,7 +141,7 @@ fn record_and_dump_full_with_isa(
     // Keep the temp dir alive until the JSON is parsed, then drop.
     let owned_path = blob_path.clone();
     drop(tmp);
-    Some((doc, owned_path))
+    (doc, owned_path)
 }
 
 /// Assert `metadata.program` ends with the expected source filename.
@@ -339,13 +334,11 @@ fn branching_program() -> Vec<Instruction> {
 
 #[test]
 fn test_branching_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_branching_via_ct_print_full",
         "branching_test",
         &branching_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -461,11 +454,8 @@ fn loop_program() -> Vec<Instruction> {
 
 #[test]
 fn test_loop_via_ct_print_full() {
-    let Some((doc, source_path)) =
-        record_and_dump_full("test_loop_via_ct_print_full", "loop_test", &loop_program())
-    else {
-        return;
-    };
+    let (doc, source_path) =
+        record_and_dump_full("test_loop_via_ct_print_full", "loop_test", &loop_program());
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -563,13 +553,11 @@ fn nested_calls_program() -> Vec<Instruction> {
 
 #[test]
 fn test_nested_calls_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_nested_calls_via_ct_print_full",
         "nested_calls_test",
         &nested_calls_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -671,13 +659,11 @@ fn test_in_program_nested_subroutines_emit_call_events() {
         // BB3: would-be inner-return continuation (unreached after this design)
         asm::ret(),
     ];
-    let Some((doc, _)) = record_and_dump_full(
+    let (doc, _) = record_and_dump_full(
         "test_in_program_nested_subroutines_emit_call_events",
         "nested_subroutines",
         &code,
-    ) else {
-        return;
-    };
+    );
     let calls = doc["counts"]["calls"].as_u64().unwrap_or(0);
     assert!(
         calls >= 3,
@@ -723,13 +709,11 @@ fn memory_program() -> Vec<Instruction> {
 
 #[test]
 fn test_memory_collection_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_memory_collection_via_ct_print_full",
         "memory_test",
         &memory_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -791,13 +775,11 @@ fn test_memory_decoded_as_sequence_value_record() {
     //      values for the memory_program scenario — the four
     //      "elements" 1,2,3,4 each surface as args[0]..args[3] at the
     //      step where load_imm targets that register.
-    let Some((doc, _)) = record_and_dump_full(
+    let (doc, _) = record_and_dump_full(
         "test_memory_decoded_as_sequence_value_record",
         "memory_test",
         &memory_program(),
-    ) else {
-        return;
-    };
+    );
     let mut kinds = std::collections::BTreeSet::new();
     for ev in doc["events"].as_array().unwrap() {
         if ev["kind"] != "step" {
@@ -871,11 +853,8 @@ fn trap_program() -> Vec<Instruction> {
 
 #[test]
 fn test_trap_via_ct_print_full() {
-    let Some((doc, source_path)) =
-        record_and_dump_full("test_trap_via_ct_print_full", "trap_test", &trap_program())
-    else {
-        return;
-    };
+    let (doc, source_path) =
+        record_and_dump_full("test_trap_via_ct_print_full", "trap_test", &trap_program());
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1009,13 +988,11 @@ fn host_calls_program() -> Vec<Instruction> {
 
 #[test]
 fn test_host_calls_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_host_calls_via_ct_print_full",
         "host_calls_test",
         &host_calls_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1203,13 +1180,11 @@ fn branch_family_program() -> Vec<Instruction> {
 
 #[test]
 fn test_branch_family_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_branch_family_via_ct_print_full",
         "branch_family_test",
         &branch_family_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1364,13 +1339,11 @@ impl Drop for GasLimitGuard {
 fn test_not_enough_gas_via_ct_print_full() {
     let _guard = GasLimitGuard::set(5);
 
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_not_enough_gas_via_ct_print_full",
         "not_enough_gas_test",
         &out_of_gas_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1447,13 +1420,11 @@ fn divide_by_zero_program() -> Vec<Instruction> {
 
 #[test]
 fn test_divide_by_zero_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_divide_by_zero_via_ct_print_full",
         "divide_by_zero_test",
         &divide_by_zero_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1555,13 +1526,11 @@ fn misaligned_access_program() -> Vec<Instruction> {
 
 #[test]
 fn test_misaligned_access_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_misaligned_access_via_ct_print_full",
         "misaligned_access_test",
         &misaligned_access_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1641,13 +1610,11 @@ fn stack_frame_program() -> Vec<Instruction> {
 
 #[test]
 fn test_stack_frame_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_stack_frame_via_ct_print_full",
         "stack_frame_test",
         &stack_frame_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1761,13 +1728,11 @@ fn pallet_revive_storage_program() -> Vec<Instruction> {
 
 #[test]
 fn test_pallet_revive_storage_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_pallet_revive_storage_via_ct_print_full",
         "pallet_revive_storage_test",
         &pallet_revive_storage_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -1939,13 +1904,11 @@ fn bitwise_program() -> Vec<Instruction> {
 
 #[test]
 fn test_bitwise_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_bitwise_via_ct_print_full",
         "bitwise_test",
         &bitwise_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -2220,13 +2183,11 @@ fn mul_div_program() -> Vec<Instruction> {
 
 #[test]
 fn test_mul_div_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_mul_div_via_ct_print_full",
         "mul_div_test",
         &mul_div_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -2460,13 +2421,11 @@ fn memory_load_store_program() -> Vec<Instruction> {
 
 #[test]
 fn test_memory_load_store_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_memory_load_store_via_ct_print_full",
         "memory_load_store_test",
         &memory_load_store_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -2618,13 +2577,11 @@ fn sbrk_out_of_bounds_program() -> Vec<Instruction> {
 
 #[test]
 fn test_sbrk_out_of_bounds_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_sbrk_out_of_bounds_via_ct_print_full",
         "sbrk_out_of_bounds_test",
         &sbrk_out_of_bounds_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -2768,13 +2725,11 @@ fn pallet_revive_transfer_program() -> Vec<Instruction> {
 
 #[test]
 fn test_pallet_revive_transfer_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_pallet_revive_transfer_via_ct_print_full",
         "pallet_revive_transfer_test",
         &pallet_revive_transfer_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -2938,14 +2893,12 @@ fn arith_64_program() -> Vec<Instruction> {
 
 #[test]
 fn test_arith_64_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full_with_isa(
+    let (doc, source_path) = record_and_dump_full_with_isa(
         "test_arith_64_test_via_ct_print_full",
         "arith_64_test",
         &arith_64_program(),
         InstructionSetKind::Latest64,
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -3136,13 +3089,11 @@ fn ext_program() -> Vec<Instruction> {
 
 #[test]
 fn test_ext_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_ext_test_via_ct_print_full",
         "ext_test",
         &ext_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -3297,13 +3248,11 @@ fn set_less_than_program() -> Vec<Instruction> {
 
 #[test]
 fn test_set_less_than_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_set_less_than_test_via_ct_print_full",
         "set_less_than_test",
         &set_less_than_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -3457,13 +3406,11 @@ fn indirect_call_dispatch_program() -> Vec<Instruction> {
 
 #[test]
 fn test_indirect_call_dispatch_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_indirect_call_dispatch_test_via_ct_print_full",
         "indirect_call_dispatch_test",
         &indirect_call_dispatch_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -3605,13 +3552,11 @@ fn pallet_revive_event_program() -> Vec<Instruction> {
 
 #[test]
 fn test_pallet_revive_event_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_pallet_revive_event_test_via_ct_print_full",
         "pallet_revive_event_test",
         &pallet_revive_event_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -3759,13 +3704,11 @@ fn pallet_revive_hash_program() -> Vec<Instruction> {
 
 #[test]
 fn test_pallet_revive_hash_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_pallet_revive_hash_test_via_ct_print_full",
         "pallet_revive_hash_test",
         &pallet_revive_hash_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -3921,13 +3864,11 @@ fn pallet_revive_cross_contract_call_program() -> Vec<Instruction> {
 
 #[test]
 fn test_pallet_revive_cross_contract_call_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_pallet_revive_cross_contract_call_test_via_ct_print_full",
         "pallet_revive_cross_contract_call_test",
         &pallet_revive_cross_contract_call_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);
@@ -4077,13 +4018,11 @@ fn move_reg_and_load_imm_program() -> Vec<Instruction> {
 
 #[test]
 fn test_move_reg_and_load_imm_test_via_ct_print_full() {
-    let Some((doc, source_path)) = record_and_dump_full(
+    let (doc, source_path) = record_and_dump_full(
         "test_move_reg_and_load_imm_test_via_ct_print_full",
         "move_reg_and_load_imm_test",
         &move_reg_and_load_imm_program(),
-    ) else {
-        return;
-    };
+    );
 
     assert_metadata_program_ends_with(&doc, &source_path);
     assert_step_indices_monotonic(&doc);

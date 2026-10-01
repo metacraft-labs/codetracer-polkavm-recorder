@@ -66,6 +66,10 @@ jobs:
             nimble install -y stew results
             nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
               -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
+            # ct-print: the `_via_ct_print_*` tests decode every recorded
+            # trace with it, and fail when it is missing.
+            nim c -d:release --mm:arc -p:src \
+              -o:ct-print src/codetracer_ct_print.nim
           '
           echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
 
