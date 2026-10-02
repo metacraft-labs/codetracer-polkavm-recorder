@@ -877,7 +877,7 @@ fn test_trap_via_ct_print_full() {
     );
 
     // Find the trap io event and assert its shape.  ct-print --full
-    // surfaces special events as `{kind: "io", io_kind: "elkError", ...}`
+    // surfaces special events as `{kind: "io", io_kind: "Error", ...}`
     // (per codetracer_ct_print_lib.nim §3 of the events loop), with
     // the metadata string surfaced through `text`/`bytes_b64`.
     let events = doc["events"].as_array().expect("events array");
@@ -890,18 +890,13 @@ fn test_trap_via_ct_print_full() {
         trap_events.len()
     );
     let trap = trap_events[0];
-    // The multi-stream / CTFS writer collapses EventLogKind values
-    // through `toIOEventKind` into the smaller IOEventKind palette
-    // (see codetracer_trace_writer_ffi.nim::toIOEventKind):
-    //   * ffiElkWrite       -> ioStdout
-    //   * ffiElkError       -> ioError
-    //   * ffiElkEvmEvent    -> ioStderr  (lossy collapse with TraceLogEvent)
-    // The recorder's polkavm_trap path goes through EventLogKind::Error
-    // so the resulting io_kind is ioError.
+    // An events.dat record carries the exact EventLogKind the recorder
+    // gave, and ct-print reports it by name. The recorder's polkavm_trap
+    // path goes through EventLogKind::Error.
     assert_eq!(
         trap["io_kind"].as_str(),
-        Some("ioError"),
-        "trap io event should carry io_kind=ioError; got {trap}"
+        Some("Error"),
+        "trap io event should carry io_kind=Error; got {trap}"
     );
     // The recorder calls register_special_event(EventLogKind::Error,
     // "polkavm_trap", "step=N pc=Some(...)").  In multi-stream / CTFS
@@ -1045,36 +1040,27 @@ fn test_host_calls_via_ct_print_full() {
     let events = doc["events"].as_array().expect("events array");
     let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 3, "expected exactly 3 io event entries");
-    // The multi-stream writer collapses the 14-variant EventLogKind
-    // into the 4-variant IOEventKind palette (see toIOEventKind in
-    // codetracer_trace_writer_ffi.nim):
-    //   * EventLogKind::EvmEvent      -> ioStderr (deposit_event)
-    //   * EventLogKind::TraceLogEvent -> ioStderr (set_storage)
-    //   * EventLogKind::Write         -> ioStdout (debug_message)
-    // RECORDER BUG (cross-recorder): the EvmEvent / TraceLogEvent
-    // distinction is lost in the multi-stream collapse — both surface
-    // as `ioStderr`.  This is a writer-layer collapse, not a polkavm
-    // recorder bug, but it pins the current observable behaviour so a
-    // future writer-layer expansion of IOEventKind surfaces here too.
+    // An events.dat record carries the exact EventLogKind the recorder
+    // gave, so the three kinds stay distinct:
+    //   * EventLogKind::EvmEvent      (deposit_event)
+    //   * EventLogKind::TraceLogEvent (set_storage)
+    //   * EventLogKind::Write         (debug_message)
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
-        Some("ioStderr"),
-        "first io event should carry io_kind=ioStderr (EvmEvent \
-         collapsed by toIOEventKind); got {}",
+        Some("EvmEvent"),
+        "first io event should carry io_kind=EvmEvent (deposit_event); got {}",
         io_events[0]
     );
     assert_eq!(
         io_events[1]["io_kind"].as_str(),
-        Some("ioStderr"),
-        "second io event should carry io_kind=ioStderr (TraceLogEvent \
-         collapsed by toIOEventKind); got {}",
+        Some("TraceLogEvent"),
+        "second io event should carry io_kind=TraceLogEvent (set_storage); got {}",
         io_events[1]
     );
     assert_eq!(
         io_events[2]["io_kind"].as_str(),
-        Some("ioStdout"),
-        "third io event should carry io_kind=ioStdout (Write \
-         collapsed by toIOEventKind); got {}",
+        Some("Write"),
+        "third io event should carry io_kind=Write (debug_message); got {}",
         io_events[2]
     );
     // Spot-check the textual content: the recorder formats the
@@ -1363,14 +1349,14 @@ fn test_not_enough_gas_via_ct_print_full() {
     );
 
     // The out-of-gas error must surface as a single io event of kind
-    // Error → collapsed to ioError by toIOEventKind.
+    // EventLogKind::Error.
     let events = doc["events"].as_array().expect("events array");
     let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
-        Some("ioError"),
-        "out-of-gas io event should carry io_kind=ioError; got {}",
+        Some("Error"),
+        "out-of-gas io event should carry io_kind=Error; got {}",
         io_events[0]
     );
     let text = io_events[0]["text"].as_str().unwrap_or("");
@@ -1392,7 +1378,7 @@ fn test_not_enough_gas_via_ct_print_full() {
 }
 
 // ===========================================================================
-// divide_by_zero_test — distinct ioError taxonomy beyond plain trap
+// divide_by_zero_test — distinct Error taxonomy beyond plain trap
 // ===========================================================================
 //
 // PolkaVM follows RISC-V semantics for div/rem-by-zero: the
@@ -1408,7 +1394,7 @@ fn test_not_enough_gas_via_ct_print_full() {
 //
 // The fixture loads A0=10, A1=0, performs `div_unsigned_32 A2 = A0 / A1`,
 // then returns.  The trace must surface exactly one io event of
-// kind ioError with the divide-by-zero metadata.
+// kind Error with the divide-by-zero metadata.
 fn divide_by_zero_program() -> Vec<Instruction> {
     vec![
         asm::load_imm(A0, 10),
@@ -1455,8 +1441,8 @@ fn test_divide_by_zero_via_ct_print_full() {
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
-        Some("ioError"),
-        "divide_by_zero io event should carry io_kind=ioError; got {}",
+        Some("Error"),
+        "divide_by_zero io event should carry io_kind=Error; got {}",
         io_events[0]
     );
     let text = io_events[0]["text"].as_str().unwrap_or("");
@@ -1487,12 +1473,12 @@ fn test_divide_by_zero_via_ct_print_full() {
 }
 
 // ===========================================================================
-// misaligned_access_test — distinct ioError taxonomy for misaligned loads
+// misaligned_access_test — distinct Error taxonomy for misaligned loads
 // ===========================================================================
 //
 // PolkaVM does NOT enforce alignment — unaligned memory accesses
 // succeed and are handled in software — but the M12 fixtures want
-// this distinct taxonomy surfaced as an `ioError` entry so downstream
+// this distinct taxonomy surfaced as an `Error` io entry so downstream
 // tooling can tell it apart from a plain panic / trap.
 //
 // The recorder inspects each load/store instruction at step time,
@@ -1503,7 +1489,7 @@ fn test_divide_by_zero_via_ct_print_full() {
 //
 // The fixture issues a `store_u32` at address 1 (1 is not 4-byte
 // aligned) targeting the program's RW segment.  Exactly one io event
-// of kind ioError must surface.
+// of kind Error must surface.
 fn misaligned_access_program() -> Vec<Instruction> {
     // SP starts at the top of the (page-aligned) stack region.  We
     // want a write that (a) lands inside the mapped stack page so
@@ -1552,8 +1538,8 @@ fn test_misaligned_access_via_ct_print_full() {
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
-        Some("ioError"),
-        "misaligned_access io event should carry io_kind=ioError; got {}",
+        Some("Error"),
+        "misaligned_access io event should carry io_kind=Error; got {}",
         io_events[0]
     );
     let text = io_events[0]["text"].as_str().unwrap_or("");
@@ -1767,8 +1753,7 @@ fn test_pallet_revive_storage_via_ct_print_full() {
     );
 
     // Counts: 1 entry-point Call + 2 ecalli Calls = 3 calls.  Two
-    // io_events: both ecallis route onto EventLogKind::TraceLogEvent,
-    // collapsed to ioStderr by toIOEventKind.
+    // io_events: both ecallis route onto EventLogKind::TraceLogEvent.
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
@@ -1789,9 +1774,8 @@ fn test_pallet_revive_storage_via_ct_print_full() {
     for (idx, io) in io_events.iter().enumerate() {
         assert_eq!(
             io["io_kind"].as_str(),
-            Some("ioStderr"),
-            "io_event[{idx}] should carry io_kind=ioStderr (TraceLogEvent \
-             collapsed by toIOEventKind); got {io}"
+            Some("TraceLogEvent"),
+            "io_event[{idx}] should carry io_kind=TraceLogEvent; got {io}"
         );
     }
     let set_text = io_events[0]["text"].as_str().unwrap_or("");
@@ -2593,7 +2577,7 @@ fn test_sbrk_out_of_bounds_via_ct_print_full() {
         "only the entry-point Call(main) is expected; the segfault \
          termination is not a call boundary; counts={counts}"
     );
-    // The segfault must surface as exactly one io_event (Error → ioError).
+    // The segfault must surface as exactly one io_event (EventLogKind::Error).
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
@@ -2605,8 +2589,8 @@ fn test_sbrk_out_of_bounds_via_ct_print_full() {
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
-        Some("ioError"),
-        "segfault io event should carry io_kind=ioError; got {}",
+        Some("Error"),
+        "segfault io event should carry io_kind=Error; got {}",
         io_events[0]
     );
     let text = io_events[0]["text"].as_str().unwrap_or("");
@@ -3606,8 +3590,7 @@ fn test_pallet_revive_event_test_via_ct_print_full() {
         "expected exactly 2 call events (1 entry-point + 1 ecalli); counts={counts}"
     );
     // Per `src/tracer.rs` Ecalli arm, index 4 is routed onto
-    // EventLogKind::EvmEvent with name `ink_deposit_event`.  ct-print
-    // collapses that through `toIOEventKind` to ioEvmEvent.
+    // EventLogKind::EvmEvent with name `ink_deposit_event`.
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
@@ -3679,7 +3662,7 @@ fn test_pallet_revive_event_test_via_ct_print_full() {
 //      (NOT `ecalli_19` / `ecalli_20`) surface in both the functions
 //      table AND the call sequence.
 //   2. Each ecalli routes onto exactly one io_event with the canonical
-//      input/output metadata (TraceLogEvent → ioStderr).
+//      input/output metadata (TraceLogEvent).
 //   3. The A0..A2 register snapshots at each call boundary carry the
 //      exact pointer / length values via the synthetic `args` Sequence.
 fn pallet_revive_hash_program() -> Vec<Instruction> {
@@ -3753,8 +3736,7 @@ fn test_pallet_revive_hash_test_via_ct_print_full() {
     );
 
     // Counts: 1 entry-point Call + 2 ecalli Calls = 3 calls.  Two
-    // io_events: both ecallis route onto EventLogKind::TraceLogEvent,
-    // collapsed to ioStderr by toIOEventKind.
+    // io_events: both ecallis route onto EventLogKind::TraceLogEvent.
     let counts = &doc["counts"];
     assert_eq!(
         counts["calls"].as_u64(),
@@ -3776,16 +3758,14 @@ fn test_pallet_revive_hash_test_via_ct_print_full() {
     assert_eq!(io_events.len(), 2, "expected exactly 2 io event entries");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
-        Some("ioStderr"),
-        "io_event[0] should carry io_kind=ioStderr (TraceLogEvent collapsed \
-         by toIOEventKind); got {}",
+        Some("TraceLogEvent"),
+        "io_event[0] should carry io_kind=TraceLogEvent; got {}",
         io_events[0]
     );
     assert_eq!(
         io_events[1]["io_kind"].as_str(),
-        Some("ioStderr"),
-        "io_event[1] should carry io_kind=ioStderr (TraceLogEvent collapsed \
-         by toIOEventKind); got {}",
+        Some("TraceLogEvent"),
+        "io_event[1] should carry io_kind=TraceLogEvent; got {}",
         io_events[1]
     );
     assert_eq!(
@@ -3841,7 +3821,7 @@ fn test_pallet_revive_hash_test_via_ct_print_full() {
 //   1. The canonical name `seal_call` (NOT `ecalli_7`) surfaces in both
 //      the functions table AND the call sequence.
 //   2. The ecalli routes onto exactly one io_event carrying the canonical
-//      cross-contract metadata (TraceLogEvent → ioStderr).
+//      cross-contract metadata (TraceLogEvent).
 //   3. The A0..A5 register snapshots at the call boundary carry the
 //      exact destination / value / gas / input / output values via the
 //      synthetic `args` Sequence.
@@ -3920,9 +3900,8 @@ fn test_pallet_revive_cross_contract_call_test_via_ct_print_full() {
     assert_eq!(io_events.len(), 1, "expected exactly 1 io event entry");
     assert_eq!(
         io_events[0]["io_kind"].as_str(),
-        Some("ioStderr"),
-        "io_event should carry io_kind=ioStderr (TraceLogEvent collapsed \
-         by toIOEventKind); got {}",
+        Some("TraceLogEvent"),
+        "io_event should carry io_kind=TraceLogEvent; got {}",
         io_events[0]
     );
     assert_eq!(

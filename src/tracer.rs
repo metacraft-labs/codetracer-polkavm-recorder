@@ -472,7 +472,7 @@ impl PolkaVmTracer {
                             // zero.  Execution continues with the RISC-V
                             // sentinel result so the rest of the trace
                             // remains intact; the event surfaces in
-                            // ct-print --full as a single ioError entry.
+                            // ct-print --full as a single Error io entry.
                             Instruction::div_unsigned_32(_d, _s1, s2)
                             | Instruction::div_unsigned_64(_d, _s1, s2)
                             | Instruction::div_signed_32(_d, _s1, s2)
@@ -1183,7 +1183,7 @@ fn ensure_path_with_line_lengths(
 ///
 /// PolkaVM does not enforce alignment — unaligned accesses succeed and
 /// are handled in software — but the M12 fixtures want this distinct
-/// taxonomy surfaced as an `ioError` entry in the trace so downstream
+/// taxonomy surfaced as an `Error` io entry in the trace so downstream
 /// tooling can tell it apart from a plain panic / trap.
 ///
 /// `base_reg` carries the address-base register for the `*_indirect_*`
