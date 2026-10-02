@@ -298,3 +298,23 @@ fn empty_debug_path_falls_back_to_the_blob() {
     );
     assert_conventional(&records[0].0, &records[0].1, "the program blob, not source");
 }
+
+/// A source file whose lines hold nothing still has a non-zero size: its
+/// first line gets one position.
+#[test]
+fn empty_source_file_gets_one_position() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_path = tmp.path().join("empty.rs");
+    std::fs::write(&src_path, "").expect("write source");
+    let blob_path = tmp.path().join("empty_source.polkavm");
+    let blob = build_partially_mapped_blob(&src_path.to_string_lossy(), &[1]);
+    let ct = record(&blob_path, &blob, &tmp.path().join("traces"));
+
+    let records = path_tables(&ct);
+    let src_str = src_path.to_string_lossy().into_owned();
+    let (_, table) = records
+        .iter()
+        .find(|(p, _)| *p == src_str)
+        .unwrap_or_else(|| panic!("no paths.dat record for {src_str}"));
+    assert_eq!(*table, vec![1], "an empty file's table is [1]");
+}

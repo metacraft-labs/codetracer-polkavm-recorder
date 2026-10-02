@@ -220,21 +220,30 @@ impl PolkaVmTracer {
         tracer.writer.enable_column_breakpoints_support();
         tracer.writer.enable_column_motions_support();
 
-        // Pre-register every DWARF-resolved source path with its
-        // per-line UTF-8 byte-length table.  The `paths.dat` Layout A
-        // record is required by the column-aware reader to map the
-        // writer-side global byte position back to a `(line, column)`
-        // pair.  Files that aren't on disk (or that fail to read)
-        // degrade to an empty length table — the writer treats that
-        // as "no per-line data" and column resolution falls back to
-        // `None` at read time, matching the contract codified in P6.5.
-        // We MUST register paths before `start()` interns the blob
-        // path; otherwise the implicit `start`-time interning would
-        // create a stale paths.dat entry without per-line byte counts.
+        // Register every file a step, a function or a call can name
+        // before any of them is mentioned. In a column-aware trace a
+        // file's `paths.dat` Layout A table is fixed at its first
+        // mention, and a table offered later is not honoured
+        // (`internal-files.md` §"`paths.dat` Layout A").
+        //
+        // * Every DWARF-resolved source path, with its per-line table
+        //   (the conventional table when the source is not on this
+        //   host).
+        // * The blob path, which `start` and every synthesised function
+        //   name, and which the DWARF-miss fallback steps on at line
+        //   `pc + 1`. The blob is not source, so it gets the
+        //   conventional table rather than the newline-split bytes of
+        //   the binary.
         let mut registered_paths: HashSet<PathBuf> = HashSet::new();
         for path in source_mapper.distinct_paths() {
             ensure_path_with_line_lengths(&mut *tracer.writer, path, &mut registered_paths);
         }
+        register_path_with_table(
+            &mut *tracer.writer,
+            blob_path,
+            &conventional_line_table(),
+            &mut registered_paths,
+        );
 
         // -- 7. Start the trace ----------------------------------------------------------
         // ``start`` registers the ``<toplevel>`` function, opens its call frame
@@ -374,14 +383,10 @@ impl PolkaVmTracer {
                     // recorder's behaviour at recorder.rs:691.
                     let current_loc = (source_path.to_path_buf(), line, column);
                     if prev_line.as_ref() != Some(&current_loc) {
-                        // Late path registration: lazy DWARF entries
-                        // (or callers that bypass `from_blob`) may
-                        // introduce a fresh source path mid-trace.
-                        // Register it before emitting the first step
-                        // that references it — the Nim writer's
-                        // first-registration-wins semantics make this
-                        // a no-op on paths already registered up-front
-                        // by `trace_program`.
+                        // Every path the mapper or the fallback can
+                        // produce was registered before `start`; this
+                        // keeps the step from being a file's first
+                        // mention should one ever be missed.
                         ensure_path_with_line_lengths(
                             &mut *self.writer,
                             source_path,
@@ -1110,28 +1115,33 @@ impl PolkaVmTracer {
     }
 }
 
-/// Compute the per-line UTF-8 byte-length table required by the
-/// `paths.dat` Layout A record (column-aware mode).
+/// The table a column-aware `paths.dat` record carries for a file whose
+/// source cannot be read: `100000` lines of `1024` positions each
+/// (`internal-files.md` §"`paths.dat` Layout A").
+fn conventional_line_table() -> Vec<u32> {
+    const CONVENTIONAL_LINES: usize = 100_000;
+    const CONVENTIONAL_LINE_LENGTH: u32 = 1024;
+    vec![CONVENTIONAL_LINE_LENGTH; CONVENTIONAL_LINES]
+}
+
+/// The per-line UTF-8 byte-length table of a source file, as the
+/// `paths.dat` Layout A record carries it (column-aware mode).
 ///
 /// `line_lengths[i]` is the byte count of source line `i+1` (1-based,
 /// matching the CTFS spec), excluding the trailing `\n`.  Files that
-/// don't end with `\n` still have their final line counted.  Files that
-/// can't be read (e.g. DWARF-referenced sources missing from the
-/// recording host) yield an empty `Vec` — the writer treats that as
-/// "no per-line data" and column resolution at read time falls back to
-/// surfacing `None`, matching the back-compat-safe default codified in
-/// P6.5.  Synthetic angle-bracket paths (`<stdin>`, `<unknown>`) are
-/// also treated as empty.
-///
-/// Ported from the Solana recorder's `read_line_lengths_for_path`
-/// (`codetracer-solana-recorder/src/recorder.rs:68`).
-fn read_line_lengths_for_path(path: &Path) -> Vec<u32> {
+/// don't end with `\n` still have their final line counted.  A file
+/// whose lines hold nothing gives its first line one position, so the
+/// file has a non-zero size.  A file that cannot be read (a
+/// DWARF-referenced source missing from the recording host) and a
+/// synthetic angle-bracket path (`<stdin>`, `<unknown>`) get the
+/// conventional table.
+fn line_table_for_path(path: &Path) -> Vec<u32> {
     let lossy = path.to_string_lossy();
     if lossy.is_empty() || (lossy.starts_with('<') && lossy.ends_with('>')) {
-        return Vec::new();
+        return conventional_line_table();
     }
     let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
+        return conventional_line_table();
     };
     let mut lines: Vec<u32> = Vec::new();
     let mut current_len: u32 = 0;
@@ -1146,18 +1156,16 @@ fn read_line_lengths_for_path(path: &Path) -> Vec<u32> {
     if current_len > 0 || bytes.last() != Some(&b'\n') {
         lines.push(current_len);
     }
+    if lines.iter().all(|&l| l == 0) {
+        lines[0] = 1;
+    }
     lines
 }
 
-/// Register `path` with its per-line UTF-8 byte-length table via the
-/// `paths.dat` Layout A entry point, once per recorder lifetime.
-/// Subsequent calls for the same path are no-ops.
-///
-/// Required by the column-aware mode: the reader maps the writer-side
-/// global byte position back to a `(line, column)` pair using these
-/// tables.  Soft-fails (logged to stderr) if the FFI rejects the call —
-/// the trace remains usable, but columns on that file fall back to
-/// `None` at read time.
+/// Register a source `path` with its per-line table (see
+/// [`line_table_for_path`]), once per recorder lifetime. Subsequent calls
+/// for the same path are no-ops: a file's table is fixed when it is first
+/// registered, so it is never offered a second one.
 fn ensure_path_with_line_lengths(
     writer: &mut dyn TraceWriter,
     path: &Path,
@@ -1166,8 +1174,24 @@ fn ensure_path_with_line_lengths(
     if path.as_os_str().is_empty() || registered_paths.contains(path) {
         return;
     }
-    let line_lengths = read_line_lengths_for_path(path);
-    if let Err(err) = TraceWriter::register_path_with_line_lengths(writer, path, &line_lengths) {
+    register_path_with_table(writer, path, &line_table_for_path(path), registered_paths);
+}
+
+/// Register `path` with `table` unless it is already registered.
+///
+/// Soft-fails (logged to stderr) if the writer rejects the call — the
+/// trace remains usable, but columns on that file fall back to `None` at
+/// read time.
+fn register_path_with_table(
+    writer: &mut dyn TraceWriter,
+    path: &Path,
+    table: &[u32],
+    registered_paths: &mut HashSet<PathBuf>,
+) {
+    if !registered_paths.insert(path.to_path_buf()) {
+        return;
+    }
+    if let Err(err) = TraceWriter::register_path_with_line_lengths(writer, path, table) {
         eprintln!(
             "[codetracer-polkavm-recorder] register_path_with_line_lengths failed for {}: {} \
              (column resolution will fall back to None for this file)",
@@ -1175,7 +1199,6 @@ fn ensure_path_with_line_lengths(
             err,
         );
     }
-    registered_paths.insert(path.to_path_buf());
 }
 
 /// Detect a misaligned PolkaVM load/store and emit a
