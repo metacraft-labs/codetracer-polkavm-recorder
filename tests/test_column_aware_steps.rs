@@ -164,12 +164,8 @@ fn test_column_aware_flag_set_even_without_dwarf_columns() {
     // and the recorder falls back to its blob-path + pc-derived line
     // synthesis with `column = None`.  ct-print's column-aware emit
     // path only attaches a `column` field when the global-position
-    // decoder can resolve a (path, line, column) tuple — for paths
-    // that were registered with an empty line-length table (the
-    // not-on-disk-fallback our recorder takes for synthetic blobs)
-    // the decoder leaves the field absent.  That's the back-compat
-    // contract codified in P6.5 ("column resolution falls back to
-    // None at read time").  Either shape — column field absent, or
+    // decoder can resolve a (path, line, column) tuple; a column-less
+    // step leaves it absent or null.  Either shape — column field absent, or
     // column field present and >= 1 — passes; the load-bearing
     // assertion is `has_column_aware_steps == true` above.
     let events = doc["events"].as_array().expect("events array");

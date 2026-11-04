@@ -66,7 +66,10 @@ impl SourceMapper {
                             // we forward that downstream so the writer
                             // emits a column-less step.
                             let column = frame.column();
-                            if line > 0 {
+                            // A frame with no path names no file: the
+                            // instruction is treated like one without
+                            // debug information, and steps on the blob.
+                            if line > 0 && !path.as_os_str().is_empty() {
                                 locations.insert(pc.0, SourceLocation { path, line, column });
                             }
                         }
@@ -113,14 +116,19 @@ impl SourceMapper {
         self.locations.len()
     }
 
-    /// Iterate over every distinct source path the mapper has cached.
+    /// Iterate over every distinct source path the mapper has cached,
+    /// in the order of the lowest program counter that maps to it.
     /// Used by the tracer to register each path's per-line byte-length
-    /// table with the writer at column-aware mode initialization.
+    /// table with the writer before any step names it; the order is the
+    /// order the paths get their ids in, so it must not depend on hash
+    /// iteration.
     pub fn distinct_paths(&self) -> impl Iterator<Item = &Path> {
         let mut seen: std::collections::HashSet<&Path> = std::collections::HashSet::new();
         let mut paths: Vec<&Path> = Vec::new();
-        for loc in self.locations.values() {
-            let p: &Path = loc.path.as_path();
+        let mut pcs: Vec<&u32> = self.locations.keys().collect();
+        pcs.sort_unstable();
+        for pc in pcs {
+            let p: &Path = self.locations[pc].path.as_path();
             if seen.insert(p) {
                 paths.push(p);
             }
