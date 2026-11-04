@@ -92,8 +92,11 @@ package codetracer_polkavm_recorder:
     "cargo >=1.85"
     # C compiler driver — rustc links through `cc`, and build scripts
     # (cc-rs, the Nim FFI) compile C. Declaring it puts its directory on
-    # every cargo edge's PATH. Windows links with MSVC instead.
-    when defined(linux):
+    # every cargo edge's PATH. Windows Cargo links with MSVC instead; the
+    # owning ct-print constructor (``build_writer_artifacts.buildCtPrint``)
+    # separately compiles with GCC on Windows, so ``gcc`` is declared there
+    # for that edge only (the Windows cargo edges do not register it).
+    when defined(linux) or defined(windows):
       "gcc"
     elif defined(macosx):
       "clang"
