@@ -58,7 +58,7 @@
 ## whole-workspace ``cargo.test`` execute edge below therefore matches
 ## the repo's own ``just test`` one-for-one — there is no per-OS
 ## partition to model. The one ``#[ignore]``d test in
-## ``tests/test_tracer.rs`` is a spec-correctness placeholder cargo
+## ``tests/test_tracer.rs`` is an explicit fixture-export utility cargo
 ## does not run by default (matching ``cargo test`` / ``just test``); it
 ## is compiled into the test binary but never executed, so no execute
 ## edge is dropped. The shell verify edge is POSIX-portable (``bash``)
@@ -78,6 +78,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
+import "../codetracer-trace-format-nim/build_writer_artifacts"
 
 package codetracer_polkavm_recorder:
   defaultToolProvisioning "path"
@@ -193,6 +194,10 @@ package codetracer_polkavm_recorder:
     # ``test-programs`` is an input because the integration tests read
     # the checked-in ``test-programs/rust/flow_test.polkavm`` fixture.
 
+    const nimRoot = "../codetracer-trace-format-nim"
+    let decoderBuild = buildCtPrint(nimRoot)
+    let decoderBinary = ctPrintPath(nimRoot)
+
     let testsBuild = cargo.test(
       locked = true,
       noRun = true,
@@ -206,11 +211,11 @@ package codetracer_polkavm_recorder:
     let testsRun = cargo.test(
       locked = true,
       actionId = "codetracer-polkavm-recorder.cargo-test-run",
-      after = @[testsBuild.action],
+      after = @[testsBuild.action, decoderBuild],
       extraInputs = @[
         "Cargo.toml", "Cargo.lock",
         "src", "tests", "test-programs",
-        "target/debug/deps"
+        "target/debug/deps", decoderBinary
       ])
 
     # ---- CLI-convention verification edge -----------------------------
