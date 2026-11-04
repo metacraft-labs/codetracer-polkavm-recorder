@@ -10,8 +10,14 @@ build:
 build-release:
   cargo build --release --locked
 
+# Build `ct-print` in the sibling codetracer-trace-format-nim checkout. The
+# tests decode every recorded trace with it, at the fixed path
+# `../codetracer-trace-format-nim/ct-print`, and fail when it is missing. The
+# sibling's own `buildCtPrint` nimble task owns the compile flags. It runs with
+# this dev shell's Nim, as CI does: CI's dev shell has no `direnv`, and a fresh
+# sibling clone has no allowed `.envrc`. The build is incremental.
 build-decoder:
-  cd ../codetracer-trace-format-nim && direnv exec . just build-ct-print
+  cd ../codetracer-trace-format-nim && nimble buildCtPrint
 
 test: build-decoder
   cargo test --locked
