@@ -112,6 +112,12 @@ package codetracer_polkavm_recorder:
     # static library into the cargo build (the FFI's C output
     # ``#include``s ``zstd.h`` and the CBOR+Zstd writer links libzstd).
     "zstd"
+    # zstd.h + libzstd for the sibling ct-print edge
+    # (``build_writer_artifacts.buildCtPrint`` compiles and links against
+    # them; ``zstd`` is the CLI only). The constructor cannot provision a
+    # tool from inside ``build:`` and refuses a recipe that omits it.
+    when not defined(windows):
+      "zstd-dev"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
