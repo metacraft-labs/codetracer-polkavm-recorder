@@ -201,8 +201,6 @@ package codetracer_polkavm_recorder:
     # the checked-in ``test-programs/rust/flow_test.polkavm`` fixture.
 
     const nimRoot = "../codetracer-trace-format-nim"
-    let decoderBuild = buildCtPrint(nimRoot)
-    let decoderBinary = ctPrintPath(nimRoot)
 
     let testsBuild = cargo.test(
       locked = true,
@@ -213,6 +211,14 @@ package codetracer_polkavm_recorder:
         "src", "tests", "test-programs"
       ],
       extraOutputs = @["target/debug/deps"])
+
+    # The decoder edge runs after the test build: that build's
+    # ``codetracer_trace_writer_nim`` ``build.rs`` is what installs the
+    # sibling's nimble ``requires`` (``results``, ``stew``) into the nimble
+    # path ``buildCtPrint``'s compile resolves them from (its doc comment
+    # asks a recorder to pass that edge here).
+    let decoderBuild = buildCtPrint(nimRoot, after = @[testsBuild.action])
+    let decoderBinary = ctPrintPath(nimRoot)
 
     let testsRun = cargo.test(
       locked = true,
