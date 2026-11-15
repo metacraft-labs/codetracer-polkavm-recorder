@@ -41,6 +41,10 @@ where
 struct AttributeParser<R: gimli::Reader> {
     depth: usize,
     low_pc: Option<SectionTarget>,
+    // codetracer patch: `DW_AT_low_pc`'s address when no relocation names its
+    // target (an executable's DWARF, whose relocations the ELF does not keep
+    // against `.debug_info`); resolved through the section map instead.
+    low_pc_address: Option<u64>,
     high_pc: Option<SectionTarget>,
     size: Option<u64>,
     ranges_offset: Option<gimli::RangeListsOffset<<R as gimli::Reader>::Offset>>,
@@ -176,6 +180,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
         AttributeParser {
             depth,
             low_pc: None,
+            low_pc_address: None,
             high_pc: None,
             size: None,
             ranges_offset: None,
@@ -197,9 +202,20 @@ impl<R: gimli::Reader> AttributeParser<R> {
         &self,
         sections: &Sections,
         relocations: &BTreeMap<SectionTarget, RelocationKind>,
+        section_map: &RangeMap<SectionIndex>,
         unit: &Unit<R>,
         mut callback: impl FnMut(Source),
     ) -> Result<(), ProgramFromElfError> {
+        // codetracer patch: a `DW_AT_low_pc` without a relocation is filed at
+        // its own address. Address 0 is a discarded function's tombstone.
+        let low_pc = self.low_pc.or_else(|| {
+            let address = self.low_pc_address.filter(|&address| address != 0)?;
+            let (range, &section_index) = section_map.get(address)?;
+            Some(SectionTarget {
+                section_index,
+                offset: address - range.start,
+            })
+        });
         if let Some(ranges_offset) = self.ranges_offset {
             parse_ranges::<R>(
                 sections,
@@ -210,7 +226,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
                 callback,
                 self.is_64bit,
             )?;
-        } else if let (Some(low_pc), Some(high_pc)) = (self.low_pc, self.high_pc) {
+        } else if let (Some(low_pc), Some(high_pc)) = (low_pc, self.high_pc) {
             if low_pc.section_index != high_pc.section_index {
                 return Err(ProgramFromElfError::other(
                     "failed to process DWARF: DW_AT_low_pc and DW_AT_high_pc point to different sections",
@@ -224,7 +240,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
 
             log::trace!("  Range from low_pc + high_pc (abs): {}", source);
             callback(source);
-        } else if let (Some(low_pc), Some(size)) = (self.low_pc, self.size) {
+        } else if let (Some(low_pc), Some(size)) = (low_pc, self.size) {
             let source = Source {
                 section_index: low_pc.section_index,
                 offset_range: (low_pc.offset..low_pc.offset + size).into(),
@@ -278,6 +294,8 @@ impl<R: gimli::Reader> AttributeParser<R> {
                     if let Some(target) = try_fetch_relocation(relocations, relocation_target, self.is_64bit)? {
                         log::trace!("  = {target} (address)");
                         self.low_pc = Some(target);
+                    } else if let gimli::AttributeValue::Addr(address) = value.value {
+                        self.low_pc_address = Some(address);
                     }
 
                     Ok(())
@@ -803,8 +821,17 @@ where
 
         let input = program.header().raw_program_buf();
         let mut target = None;
+        // codetracer patch: the line-program address `target` corresponds to.
+        // `target` is only moved by instructions that carry a relocation
+        // (`DW_LNE_set_address`, a relocated `DW_LNS_advance_pc` /
+        // `DW_LNS_fixed_advance_pc`); special opcodes and unrelocated advances
+        // move only the row's address. Each row is filed at `target` plus how
+        // far its address has moved since, instead of at `target` itself, which
+        // put every row of a function at the function's first instruction.
+        let mut target_address: Option<u64> = None;
         loop {
             row.reset(program.header());
+            let mut target_moved = false;
             let tracker = input.start_tracking();
             let Some(instruction) = iter.next_instruction(program.header())? else {
                 break;
@@ -837,6 +864,7 @@ where
 
                     if let Ok(None) = try_fetch_size_relocation(relocations, relocation_target, is_64bit) {
                         target = None;
+                        target_moved = true;
                     } else {
                         // TODO: Some toolchains emit a size-style relocation (pair/origin..target),
                         // while others may emit a direct absolute relocation. Try the size
@@ -855,6 +883,7 @@ where
                     };
 
                     target = try_fetch_relocation(relocations, relocation_target, is_64bit)?;
+                    target_moved = true;
                 }
 
                 LineInstruction::FixedAddPc(..) => {
@@ -863,6 +892,7 @@ where
                         offset: *tracker.list().last().unwrap(),
                     };
 
+                    target_moved = true;
                     target =
                         try_fetch_size_relocation(relocations, relocation_target, is_64bit)?.map(|(target_section_index, target_range)| {
                             SectionTarget {
@@ -873,7 +903,11 @@ where
                 }
             }
 
-            if !row.execute(instruction, &mut program)? {
+            let emits_row = row.execute(instruction, &mut program)?;
+            if target_moved {
+                target_address = target.map(|_| row.address());
+            }
+            if !emits_row {
                 continue;
             }
 
@@ -951,10 +985,17 @@ where
                     };
 
                     target = Some(section_target);
+                    target_address = Some(row.address());
                 }
             }
 
-            let Some(target) = target else {
+            let Some(target) = target.map(|target| match target_address {
+                Some(at) if row.address() >= at => SectionTarget {
+                    section_index: target.section_index,
+                    offset: target.offset + (row.address() - at),
+                },
+                _ => target,
+            }) else {
                 // Sometimes the entries seem to not have any relocation attached to them
                 // and have all zeros set by the compiler, e.g. I've seen this as the end
                 // of the line program:
@@ -1542,7 +1583,7 @@ where
                     is_declaration: parser.is_declaration,
                 };
 
-                parser.for_each_range(&self.sections, self.relocations, unit, |source| {
+                parser.for_each_range(&self.sections, self.relocations, self.section_map, unit, |source| {
                     if !source.offset_range.is_empty() {
                         subprogram.sources.push(source);
                     }
@@ -1678,7 +1719,7 @@ where
                     ));
                 };
 
-                parser.for_each_range(&self.sections, self.relocations, unit, |source| {
+                parser.for_each_range(&self.sections, self.relocations, self.section_map, unit, |source| {
                     let inlined = Inlined {
                         source,
                         inlined: Vec::new(),
