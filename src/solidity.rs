@@ -222,7 +222,7 @@ pub fn parse_resolc_debug_info(blob: &ProgramBlob) -> Option<SoliditySourceMap> 
                             .path()
                             .ok()
                             .flatten()
-                            .map(PathBuf::from)
+                            .map(crate::source_map::debug_info_path)
                             .unwrap_or_default();
                         let line = frame.line().unwrap_or(0);
 

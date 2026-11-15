@@ -9,6 +9,30 @@ use std::path::{Path, PathBuf};
 use polkavm::ProgramBlob;
 use polkavm_common::program::ProgramCounter;
 
+/// The filesystem path of a source path as a blob's debug info spells it.
+///
+/// polkavm-linker shortens every path under `/home/<user>/` to `~/...` when
+/// it writes a blob's debug strings (`simplify_path` in
+/// `polkavm-linker/src/program_from_elf.rs`), so the blob does not carry the
+/// user name of the machine that linked it. polkavm's own source cache reads
+/// such a path back against `$HOME` (`read_source_file` in
+/// `polkavm/src/source_cache.rs`); this does the same, so a recording names
+/// the file the program was built from rather than a path no tool opens.
+/// Without a usable `$HOME`, and for any other path, the path is kept as it
+/// is.
+pub fn debug_info_path(path: &str) -> PathBuf {
+    expand_home(path, std::env::var_os("HOME").as_deref())
+}
+
+fn expand_home(path: &str, home: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let (Some(relative), Some(home)) = (path.strip_prefix("~/"), home)
+        && !home.is_empty()
+    {
+        return Path::new(home).join(relative);
+    }
+    PathBuf::from(path)
+}
+
 /// Cached source location entry.
 struct SourceLocation {
     path: PathBuf,
@@ -53,7 +77,7 @@ impl SourceMapper {
                                 .path()
                                 .ok()
                                 .flatten()
-                                .map(PathBuf::from)
+                                .map(debug_info_path)
                                 .unwrap_or_default();
                             let line = frame.line().unwrap_or(0);
                             // Column-aware replay: DWARF's
@@ -146,5 +170,36 @@ mod tests {
         let mapper = SourceMapper::empty();
         assert_eq!(mapper.location_count(), 0);
         assert!(mapper.resolve(ProgramCounter(0)).is_none());
+    }
+
+    #[test]
+    fn a_home_relative_debug_path_is_read_against_home() {
+        let home = std::ffi::OsStr::new("/home/someone");
+        assert_eq!(
+            expand_home("~/src/guest/lib.rs", Some(home)),
+            PathBuf::from("/home/someone/src/guest/lib.rs")
+        );
+    }
+
+    #[test]
+    fn a_debug_path_without_the_home_prefix_is_kept() {
+        let home = std::ffi::OsStr::new("/home/someone");
+        for path in [
+            "/nix/store/x-rust-lib-src/core/src/mem/mod.rs",
+            "src/lib.rs",
+            "~user/lib.rs",
+            "~",
+        ] {
+            assert_eq!(expand_home(path, Some(home)), PathBuf::from(path));
+        }
+    }
+
+    #[test]
+    fn a_home_relative_debug_path_is_kept_without_a_home() {
+        assert_eq!(expand_home("~/lib.rs", None), PathBuf::from("~/lib.rs"));
+        assert_eq!(
+            expand_home("~/lib.rs", Some(std::ffi::OsStr::new(""))),
+            PathBuf::from("~/lib.rs")
+        );
     }
 }
