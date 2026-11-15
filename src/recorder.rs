@@ -26,7 +26,9 @@ pub fn record(blob_path: &Path, out_dir: &Path) -> Result<()> {
     let bytes = std::fs::read(blob_path)
         .with_context(|| format!("failed to read blob file: {}", blob_path.display()))?;
     let blob_bytes = if bytes.starts_with(b"\x7fELF") {
-        link_elf(&bytes).with_context(|| format!("failed to link {} into a PolkaVM blob", blob_path.display()))?
+        link_elf(&bytes).with_context(|| {
+            format!("failed to link {} into a PolkaVM blob", blob_path.display())
+        })?
     } else {
         bytes
     };

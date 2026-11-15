@@ -24,11 +24,16 @@ use std::process::Command;
 use codetracer_trace_types::TraceLowLevelEvent;
 
 fn guest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-programs").join("rust-guest")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test-programs")
+        .join("rust-guest")
 }
 
 fn build_guest(target_dir: &Path) -> PathBuf {
-    let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("run rustc");
+    let sysroot = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("run rustc");
     let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
     let has_src = sysroot.join("lib/rustlib/src/rust/library/core").is_dir()
         || std::env::var_os("__CARGO_TESTS_ONLY_SRC_ROOT").is_some();
@@ -96,7 +101,12 @@ fn a_rust_guest_recorded_from_its_elf_steps_through_its_source() {
         }
     }
 
-    let source = guest_dir().join("..").join("rust").join("flow_test.rs").canonicalize().unwrap();
+    let source = guest_dir()
+        .join("..")
+        .join("rust")
+        .join("flow_test.rs")
+        .canonicalize()
+        .unwrap();
     let source_lines: Vec<i64> = steps
         .iter()
         .filter(|(p, _)| p.canonicalize().ok().as_deref() == Some(source.as_path()))
@@ -112,7 +122,11 @@ fn a_rust_guest_recorded_from_its_elf_steps_through_its_source() {
             p
         }
     );
-    let compute: Vec<i64> = source_lines.iter().copied().filter(|l| (16..=20).contains(l)).collect();
+    let compute: Vec<i64> = source_lines
+        .iter()
+        .copied()
+        .filter(|l| (16..=20).contains(l))
+        .collect();
     let mut first_visits = compute.clone();
     first_visits.dedup();
     assert_eq!(
