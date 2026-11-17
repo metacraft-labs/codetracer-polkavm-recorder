@@ -92,8 +92,11 @@ package codetracer_polkavm_recorder:
     "cargo >=1.85"
     # C compiler driver — rustc links through `cc`, and build scripts
     # (cc-rs, the Nim FFI) compile C. Declaring it puts its directory on
-    # every cargo edge's PATH. Windows links with MSVC instead.
-    when defined(linux):
+    # every cargo edge's PATH. Windows Cargo links with MSVC instead; the
+    # owning ct-print constructor (``build_writer_artifacts.buildCtPrint``)
+    # separately compiles with GCC on Windows, so ``gcc`` is declared there
+    # for that edge only (the Windows cargo edges do not register it).
+    when defined(linux) or defined(windows):
       "gcc"
     elif defined(macosx):
       "clang"
@@ -112,6 +115,16 @@ package codetracer_polkavm_recorder:
     # static library into the cargo build (the FFI's C output
     # ``#include``s ``zstd.h`` and the CBOR+Zstd writer links libzstd).
     "zstd"
+    # zstd.h + libzstd for the sibling ct-print edge
+    # (``build_writer_artifacts.buildCtPrint`` compiles and links against
+    # them; ``zstd`` is the CLI only). The ct-print edge needs both on every
+    # host, so this is declared on Windows too: there reprobuild provisions
+    # ``zstd-dev`` from a tarball whose prefix holds ``zstd.h`` and a static
+    # ``libzstd.a``, which ct-print links with ``-lzstd``. The constructor
+    # cannot provision a tool from inside ``build:`` and refuses a recipe
+    # that omits any of ``CtPrintToolSelectors`` (the C compiler plus
+    # ``zstd-dev``), on Windows as on POSIX.
+    "zstd-dev"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
@@ -124,6 +137,12 @@ package codetracer_polkavm_recorder:
     # the same ``bash tests/verify-cli-convention-no-silent-skip.sh``
     # step ``just test`` runs after ``cargo test``.
     "sh"
+    "bash"
+    "dirname"
+    "grep"
+    # ``nimble install --depsOnly`` in ``codetracer_trace_writer_nim``'s
+    # build.rs fetches the FFI's requirements with git.
+    "git"
     # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
     # Windows-guarded because Chocolatey is a Windows package manager with no
     # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.
@@ -195,8 +214,6 @@ package codetracer_polkavm_recorder:
     # the checked-in ``test-programs/rust/flow_test.polkavm`` fixture.
 
     const nimRoot = "../codetracer-trace-format-nim"
-    let decoderBuild = buildCtPrint(nimRoot)
-    let decoderBinary = ctPrintPath(nimRoot)
 
     let testsBuild = cargo.test(
       locked = true,
@@ -207,6 +224,14 @@ package codetracer_polkavm_recorder:
         "src", "tests", "test-programs"
       ],
       extraOutputs = @["target/debug/deps"])
+
+    # The decoder edge runs after the test build: that build's
+    # ``codetracer_trace_writer_nim`` ``build.rs`` is what installs the
+    # sibling's nimble ``requires`` (``results``, ``stew``) into the nimble
+    # path ``buildCtPrint``'s compile resolves them from (its doc comment
+    # asks a recorder to pass that edge here).
+    let decoderBuild = buildCtPrint(nimRoot, after = @[testsBuild.action])
+    let decoderBinary = ctPrintPath(nimRoot)
 
     let testsRun = cargo.test(
       locked = true,
@@ -245,5 +270,35 @@ package codetracer_polkavm_recorder:
         "Cargo.toml", "Cargo.lock", "src"
       ],
       cacheable = false)
+
+    # ---- Tool identities each edge runs --------------------------------
+    #
+    # A ``uses:`` declaration alone does not reach an edge: under typed
+    # provisioning an action's PATH (and pkg-config search path) is built
+    # from the tool identities registered on it. Without these the cargo
+    # edges ran with no ``nim`` / ``nimble`` on PATH, and
+    # ``codetracer_trace_writer_nim``'s build.rs failed at ``nimble install
+    # --depsOnly``; on macOS they also ran without the Nix clang wrapper, so
+    # linking zstd-sys's build script failed on ``-liconv``. Every cargo edge
+    # builds that crate, so each gets what its build scripts run: ``nimble``
+    # (which fetches with ``git``) and ``nim`` for the Nim FFI, ``capnp`` for
+    # ``codetracer_trace_format_capnp``, the C compiler for cc-rs builds
+    # (zstd-sys, ring, ...) and rustc's link step, and ``pkg-config``, which
+    # the ``pkg-config`` crate consults for system libraries.
+    # The test run also builds the PolkaVM guest with ``cargo`` / ``rustc``
+    # (``tests/test_rust_guest_sources.rs``), which the same set covers.
+    # Windows registers no C compiler: Cargo links with MSVC there and the
+    # Nim FFI compiles with ``--cc:vcc``. The CLI check runs ``cargo build``
+    # itself, so it takes the same set plus its script's own tools.
+    # The ``ct-print`` edge's tools are its constructor's (``buildCtPrint``),
+    # not declared here.
+    for action in [recorderBuild, testsBuild.action, testsRun.action, cliVerify]:
+      appendRegisteredActionToolIdentityRefs(action.id,
+        ["cargo", "rustc", "nim", "nimble", "git", "capnp", "zstd"])
+      when defined(linux):
+        appendRegisteredActionToolIdentityRefs(action.id, ["gcc", "pkg-config"])
+      elif defined(macosx):
+        appendRegisteredActionToolIdentityRefs(action.id, ["clang", "pkg-config"])
+    appendRegisteredActionToolIdentityRefs(cliVerify.id, ["sh", "bash", "dirname", "grep"])
 
     discard collect("test", @[testsRun.action, cliVerify])
