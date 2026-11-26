@@ -31,9 +31,6 @@ on:
   repository_dispatch:
     types: [cross-repo-test]
 
-# NIX_CONFIG (with steps.app-token.outputs.token) is set per-job below
-# from a step that runs AFTER the ``Generate CI token`` step -- workflow
-# level can't reference the ``steps`` context.
 env:
   # Use the interpreter backend to avoid Linux sandbox clone() failures on CI runners
   POLKAVM_BACKEND: interpreter
@@ -61,22 +58,6 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
-      - name: Configure NIX_CONFIG with access-tokens
-        # The original top-level ``env: NIX_CONFIG`` block referenced
-        # ``steps.app-token.outputs.token`` -- but the ``steps`` context
-        # is unavailable at workflow level (the new GitHub Actions
-        # validator rejects the file before any job starts).  Set
-        # ``NIX_CONFIG`` via ``$GITHUB_ENV`` from a step that runs
-        # AFTER ``app-token`` so subsequent ``nix develop`` invocations
-        # can still fetch private flake inputs.
-        run: |
-          {
-            echo 'NIX_CONFIG<<NIX_EOF'
-            echo "access-tokens = github.com=${{ steps.app-token.outputs.token }}"
-            echo 'accept-flake-config = true'
-            echo 'NIX_EOF'
-          } >> "$GITHUB_ENV"
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -91,6 +72,10 @@ jobs:
         with:
           env-flavor: nix
           gh-token: ${{ steps.app-token.outputs.token }}
+          # Re-mints the job's Nix GitHub credential before the one-hour
+          # App token expires (setup-dev-env's credential broker).
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           substituters: ${{ vars.SUBSTITUTERS }}
           trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
           attic-token: ${{ secrets.ATTIC_TOKEN }}
